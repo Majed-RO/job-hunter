@@ -14,9 +14,13 @@ __pycache__/
 output/
 .jobcache/
 
-# Personal: resume stays local
-resume.md
-resume.pdf
+# Personal: resumes, CVs, constraint files and documents stay local
+resume*
+cv*
+CV*
+constraints*.txt
+*.pdf
+*.docx
 
 # Personal settings (real profile + constraints)
 config_local.py

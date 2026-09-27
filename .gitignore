@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Virtualenv / Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Per-machine state (last-seen jobs.ps feed postings)
+.jobcache/jobsps_feeds.json
+
+# Run outputs, probe pages and score cache: kept local only.
+output/
+.jobcache/
+
+# Personal: resume stays local
+resume.md
+resume.pdf
+
+# Personal settings (real profile + constraints)
+config_local.py

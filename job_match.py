@@ -1,0 +1,823 @@
+#!/usr/bin/env python3
+"""
+job_match.py — pull fresh jobs from LinkedIn + Indeed + jobs.ps, score each one
+against your resume with an LLM, and write a sorted shortlist per site.
+
+Each site's scraper lives in its own module under sources/ (linkedin.py,
+indeed.py, jobsps.py); only the sites enabled for the run are imported.
+
+All tunable values (search terms, thresholds, model, output paths, ...) live
+in config.py. Edit that file for day-to-day changes; CLI flags below exist
+only to override a value for a single run.
+
+Install:
+    pip install -U python-jobspy openai pandas python-dotenv
+    # optional, only if your resume is a PDF or .docx:
+    pip install pypdf python-docx
+    # optional, only if LLM_PROVIDER=gemini:
+    pip install google-genai
+
+Setup:
+    Create a .env file (see .env.example) with:
+        OPENROUTER_API_KEY=sk-or-...
+        OPENROUTER_MODEL=anthropic/claude-haiku-4.5   # optional, overrides config.MODEL_NAME
+
+    To score with Gemini's API directly instead of via OpenRouter (its free
+    tier is worth it for high-volume runs), also set:
+        LLM_PROVIDER=gemini                            # overrides config.LLM_PROVIDER
+        GEMINI_API_KEY=...
+        GEMINI_MODEL=gemini-2.5-flash                  # optional, overrides config.GEMINI_MODEL_NAME
+
+Run:
+    python job_match.py                       # uses everything from config.py
+    python job_match.py --results 10          # one-off override
+    python job_match.py --sites jobsps        # search only jobs.ps this run
+    python job_match.py --sites linkedin indeed
+    python job_match.py --provider gemini     # score this run with Gemini instead
+                                               # (needs GEMINI_API_KEY in .env either way)
+
+Outputs (paths set by config.OUTPUT_DIR / config.CACHE_PATH):
+    output/jobs_scored_<site>.csv  full table for one site, best first, with a pass/fail column
+    output/shortlist_<site>.md     that site's postings that clear config's thresholds, best first
+                                   (both rewritten only for the sites searched in a run, so a
+                                   --sites jobsps run leaves the LinkedIn/Indeed files alone)
+    output/history.csv             every run's rows from all sites, appended with a run_timestamp
+                                   column — never overwritten
+    .jobcache/scores.json    score cache, so re-runs only pay for new postings
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+from dotenv import load_dotenv
+from openai import OpenAI
+
+import config
+from sources import REGISTRY, load_source
+from sources.common import RUN_STATS, STANDARD_COLUMNS, days_since, title_blocked
+
+load_dotenv()  # reads .env in the current directory into os.environ, if present
+
+
+def resolve_provider_and_model(provider_override: str | None = None) -> tuple[str, str]:
+    """Pick the LLM provider + model. Precedence: --provider flag > LLM_PROVIDER
+    in .env > config.LLM_PROVIDER. The model always follows the resolved
+    provider (OPENROUTER_MODEL/GEMINI_MODEL in .env still work per-provider)."""
+    provider = (provider_override or os.getenv("LLM_PROVIDER")
+                or getattr(config, "LLM_PROVIDER", "openrouter")).strip().lower()
+    if provider not in ("openrouter", "gemini"):
+        sys.exit(f"Unknown provider {provider!r}; expected 'openrouter' or 'gemini'.")
+    model = (
+        (os.getenv("GEMINI_MODEL") or config.GEMINI_MODEL_NAME)
+        if provider == "gemini"
+        else (os.getenv("OPENROUTER_MODEL") or config.MODEL_NAME)
+    )
+    return provider, model
+
+
+# Resolved once at import time from .env/config.py; main() re-resolves and
+# overwrites these if --provider is passed, since CLI flags win last.
+PROVIDER, MODEL = resolve_provider_and_model()
+# Same pattern for the effective remote-only setting per site this run
+# (--remote/--no-remote, else config.SITE_REMOTE_ONLY, else config.IS_REMOTE):
+# prefilter() needs it but doesn't receive `args`.
+SITE_REMOTE_ONLY: dict[str, bool] = {}
+
+
+def remote_only(site) -> bool:
+    return SITE_REMOTE_ONLY.get(str(site).lower(), config.IS_REMOTE)
+CACHE_PATH = Path(config.CACHE_PATH)
+OUT_DIR = Path(config.OUTPUT_DIR)
+MAX_DESC_CHARS = 6000  # trim descriptions so token cost stays predictable
+
+# Cheap pre-filter: kill obvious non-starters before spending an API call.
+# Patterns live in config.HARD_BLOCKERS so they can be tuned without touching
+# this file. Compiled once here; each entry is (label, regex[, exception_regex]).
+# Labels in config.WORKPLACE_BLOCKER_LABELS (onsite/hybrid) only apply to
+# sites searched remote-only.
+_WORKPLACE_LABELS = set(getattr(config, "WORKPLACE_BLOCKER_LABELS", []))
+_COMPILED_BLOCKERS = [
+    (entry[0], re.compile(entry[1], re.I), re.compile(entry[2], re.I) if len(entry) > 2 else None)
+    for entry in config.HARD_BLOCKERS
+]
+
+SYSTEM_PROMPT = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
+
+Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
+{
+  "overall": int 0-100,
+  "stack_fit": int 0-100,
+  "seniority_fit": int 0-100,
+  "domain_fit": int 0-100,
+  "logistics_fit": int 0-100,
+  "verdict": "apply" | "maybe" | "skip",
+  "reason": "one sentence, max 25 words",
+  "matched": ["at most 5 concrete skills the posting asks for that the resume proves"],
+  "gaps": ["at most 3 requirements the resume does not cover"],
+  "blockers": ["hard disqualifiers: citizenship/clearance/visa sponsorship-required/timezone/onsite. Empty list if none."]
+}
+
+logistics_fit scores location, work authorization, timezone overlap and contract type
+against the candidate's constraints. If the posting hard-blocks the candidate,
+logistics_fit is below 20 and overall is capped at 30.
+
+If the posting's "Workplace check" line warns it may be on-site or hybrid, treat the
+workplace as unconfirmed: logistics_fit at most 50 and verdict at most "maybe", unless
+the description explicitly says the role is fully remote for people outside that
+location. Wording like "Remote/Hybrid" or "remote or on-site" does NOT confirm it."""
+
+USER_TEMPLATE = """<candidate_resume>
+{resume}
+</candidate_resume>
+
+<candidate_constraints>
+{constraints}
+</candidate_constraints>
+
+<job_posting>
+Source: {site}
+Title: {title}
+Company: {company}
+Location: {location}
+Job type: {job_type}
+Posted: {date_posted}
+Compensation: {comp}
+Workplace check: {workplace_check}
+
+{description}
+</job_posting>
+
+Score this posting for this candidate. JSON only."""
+
+
+# --------------------------------------------------------------------------- #
+# Inputs
+# --------------------------------------------------------------------------- #
+def load_resume(path: str | None) -> str:
+    if not path:
+        return config.CANDIDATE_PROFILE
+    p = Path(path)
+    if not p.exists():
+        sys.exit(f"Resume not found: {p}")
+    suffix = p.suffix.lower()
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        return "\n".join((page.extract_text() or "") for page in PdfReader(str(p)).pages)
+    if suffix == ".docx":
+        import docx  # python-docx
+
+        return "\n".join(par.text for par in docx.Document(str(p)).paragraphs)
+    return p.read_text(encoding="utf-8", errors="ignore")
+
+
+def load_constraints(path: str | None) -> str:
+    """Free-text file describing what you will and won't take.
+
+    Falls back to config.CONSTRAINTS when no --constraints file is passed.
+    """
+    if not path:
+        return config.CONSTRAINTS
+    p = Path(path)
+    if not p.exists():
+        sys.exit(f"Constraints file not found: {p}\n"
+                 "Omit --constraints to use config.CONSTRAINTS instead.")
+    return p.read_text(encoding="utf-8", errors="ignore")
+
+
+# --------------------------------------------------------------------------- #
+# Scrape
+# --------------------------------------------------------------------------- #
+# Each site's scraping lives in its own module under sources/ (see
+# sources/__init__.py); only the sites enabled for this run are imported.
+def fetch_jobs(args) -> pd.DataFrame:
+    frames = []
+    for name in args.sites:
+        with step_timer(f"scrape {name}"):
+            df = load_source(name).fetch(args)
+        RUN_STATS.setdefault("rows_by_source", {})[name] = len(df)
+        if len(df):
+            frames.append(df.dropna(axis=1, how="all"))
+
+    if not frames:
+        RUN_STATS.update(rows_scraped=0, unique_postings=0)
+        return pd.DataFrame(columns=list(STANDARD_COLUMNS))
+
+    # Drop columns that are entirely empty in a given source's results before
+    # merging (silences a pandas FutureWarning; the columns this script uses
+    # are re-added just below if missing).
+    jobs = pd.concat(frames, ignore_index=True)
+    for col in STANDARD_COLUMNS:
+        if col not in jobs.columns:
+            jobs[col] = None
+
+    jobs["dedupe_key"] = (
+        jobs["title"].fillna("").str.lower().str.strip()
+        + "|"
+        + jobs["company"].fillna("").str.lower().str.strip()
+    )
+    before = len(jobs)
+    jobs = jobs.drop_duplicates(subset=["job_url"]).drop_duplicates(subset=["dedupe_key"])
+    print(f"[scrape] {before} rows → {len(jobs)} unique postings")
+    RUN_STATS.update(rows_scraped=before, unique_postings=len(jobs))
+    return jobs.reset_index(drop=True)
+
+
+def prefilter(row) -> str | None:
+    """Return a short label if this posting should skip LLM scoring, else None."""
+    title = row.get("title") or ""
+    desc = row.get("description")
+    desc = desc if isinstance(desc, str) else ""
+    text = f"{title} {desc}"
+
+    blocked = title_blocked(title)
+    if blocked:
+        return blocked
+
+    # Page fetch failed (or was cut short by throttling): scoring a title with
+    # no description would just be a guess.
+    if not desc.strip():
+        return f"no description ({row.get('site')} page fetch failed)"
+
+    # LinkedIn's own "remote only" search filter (f_WT=2) is a request-side
+    # hint, not a guarantee — promoted/sponsored listings have been observed
+    # to bypass it and show up onsite anyway despite is_remote=True. JobSpy
+    # separately computes its own is_remote per posting (keyword match for
+    # LinkedIn; structured attributes + keywords for Indeed) from the actual
+    # scraped title/description/location, which is the more trustworthy
+    # signal — use it as a backstop the same way MAX_AGE_DAYS backstops
+    # HOURS_OLD. Only fires when this posting's site is searched remote-only
+    # and is_remote is explicitly False (not NaN/None: "couldn't tell").
+    is_remote_flag = row.get("is_remote")
+    site_remote_only = remote_only(row.get("site"))
+    if site_remote_only and pd.notna(is_remote_flag) and not is_remote_flag:
+        return "not confirmed remote (no remote/WFH signal found)"
+
+    # Applicant count from the LinkedIn page (Indeed rows have none -> never fire).
+    applicants = row.get("applicants")
+    if applicants is not None and not pd.isna(applicants) and applicants > config.MAX_APPLICANTS:
+        return f"> {config.MAX_APPLICANTS} applicants ({row.get('applicants_text') or applicants})"
+
+    for label, pattern, exception in _COMPILED_BLOCKERS:
+        if label in _WORKPLACE_LABELS and not site_remote_only:
+            continue
+        if pattern.search(text) and not (exception and exception.search(text)):
+            return label
+
+    # Age: LinkedIn's own "N days ago" when we have it, else JobSpy's date_posted.
+    age_days = row.get("days_old")
+    if age_days is None or pd.isna(age_days):
+        age_days = days_since(row.get("date_posted"))
+    if age_days is not None and age_days > config.MAX_AGE_DAYS:
+        return f"older than {config.MAX_AGE_DAYS} days"
+
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Score
+# --------------------------------------------------------------------------- #
+def cache_load() -> dict:
+    if CACHE_PATH.exists():
+        try:
+            return json.loads(CACHE_PATH.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def cache_save(cache: dict) -> None:
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(cache, indent=0))
+
+
+def cache_key(resume: str, row) -> str:
+    # PROVIDER is part of the key too: the same model NAME can mean different
+    # things (or the two providers can drift), and a stale cross-provider hit
+    # would silently reuse a score from the other API.
+    # likely_onsite changes the prompt (see workplace_check), so it's part of
+    # the key: a posting whose flag flips gets re-scored instead of reusing a
+    # score made without the warning.
+    blob = (f"{resume}|{PROVIDER}|{MODEL}|{row.get('job_url')}|{row.get('title')}|"
+            f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}")
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
+def _flag(value) -> bool:
+    """Truthy flag; None/NaN/False -> False."""
+    try:
+        return bool(value) and not pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+
+
+def _str_or(value, fallback: str) -> str:
+    return value if isinstance(value, str) and value.strip() else fallback
+
+
+def workplace_check(row) -> str:
+    if not _flag(row.get("likely_onsite")):
+        return "no warning"
+    return (f"WARNING: LinkedIn lists a city-level location ({row.get('li_location')}) and "
+            "the text has no explicit fully-remote statement; LinkedIn's hidden workplace "
+            "badge may say On-site or Hybrid.")
+
+
+def comp_string(row) -> str:
+    lo, hi, interval = row.get("min_amount"), row.get("max_amount"), row.get("interval")
+    if pd.isna(lo) and pd.isna(hi):
+        return "not stated"
+    parts = [str(int(v)) for v in (lo, hi) if not pd.isna(v)]
+    return f"{'–'.join(parts)} {interval or ''}".strip()
+
+
+def parse_json(text: str) -> dict:
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
+def make_llm_client():
+    """Build the client for config/`.env`-selected PROVIDER ("openrouter" or "gemini")."""
+    if PROVIDER == "gemini":
+        try:
+            from google import genai
+        except ImportError:
+            sys.exit("LLM_PROVIDER=gemini requires the google-genai package: "
+                     "pip install google-genai")
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            sys.exit("GEMINI_API_KEY is not set (required when LLM_PROVIDER=gemini).")
+        return genai.Client(api_key=api_key)
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        default_headers={"HTTP-Referer": "https://localhost", "X-Title": "job-match"},
+    )
+
+
+def _call_openrouter(client: OpenAI, prompt: str) -> str:
+    msg = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=700,
+        temperature=config.MODEL_TEMPERATURE,
+        response_format={"type": "json_object"},  # not all OpenRouter models honor this; parse_json() has a fallback
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return msg.choices[0].message.content
+
+
+def _call_gemini(client, prompt: str) -> str:
+    from google.genai import types  # local import: only needed for this provider
+
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",  # Gemini honors this reliably; parse_json() still has a fallback
+            temperature=config.MODEL_TEMPERATURE,
+            max_output_tokens=700,
+        ),
+    )
+    return response.text
+
+
+def score_one(client, resume: str, constraints: str, row) -> dict:
+    prompt = USER_TEMPLATE.format(
+        resume=resume,
+        constraints=constraints,
+        site=row.get("site"),
+        title=row.get("title"),
+        company=row.get("company"),
+        location=row.get("location"),
+        job_type=_str_or(row.get("employment_type"), _str_or(row.get("job_type"), "not stated")),
+        date_posted=row.get("date_posted"),
+        comp=comp_string(row),
+        workplace_check=workplace_check(row),
+        description=(row.get("description") or "")[:MAX_DESC_CHARS],
+    )
+    call = _call_gemini if PROVIDER == "gemini" else _call_openrouter
+    last_error: Exception | None = None
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            return parse_json(call(client, prompt))
+        except Exception as exc:
+            last_error = exc
+            time.sleep(_retry_delay_seconds(exc, attempt))
+    return {"overall": -1, "verdict": "error", "reason": f"scoring failed: {last_error}",
+            "matched": [], "gaps": [], "blockers": []}
+
+
+_RETRY_AFTER_RE = re.compile(r"retry in ([\d.]+)s", re.I)
+
+
+def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+    """How long to wait before the next attempt.
+
+    A 429 from Gemini's free tier states exactly how long to wait (e.g.
+    "Please retry in 58.8s") — that number is what actually clears the quota
+    window, and it's frequently much longer than a short exponential backoff
+    would produce, so honor it directly instead of guessing. Falls back to
+    the usual RETRY_DELAY_SECONDS * 2^attempt backoff for anything else.
+    """
+    match = _RETRY_AFTER_RE.search(str(exc))
+    if match:
+        return float(match.group(1)) + 1  # small buffer past the API's own deadline
+    return config.RETRY_DELAY_SECONDS * (2 ** attempt)
+
+
+def _dump_skipped_descriptions(jobs: pd.DataFrame, results: dict[int, dict]) -> None:
+    """Write full descriptions of LLM-verdicted "skip" postings to disk.
+
+    Only the LLM's own skips (not the free pre-filter's, which already have a
+    known blocker label) — this is for diagnosing cases like the W2 anomaly
+    (PROJECT_STATUS.md open item 3), where the LLM's paraphrase of a blocker
+    didn't match the regex meant to catch it, and descriptions weren't saved
+    anywhere to check the regex against the real text. Gated behind
+    config.DUMP_SKIPPED_DESCRIPTIONS since it writes one file per skip.
+    """
+    dump_dir = OUT_DIR / "skipped_descriptions"
+    n = 0
+    for idx, result in results.items():
+        if result.get("verdict") != "skip" or result.get("reason") == "filtered out before scoring":
+            continue
+        row = jobs.loc[idx]
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        blockers = result.get("blockers")
+        blockers_str = "; ".join(blockers) if isinstance(blockers, list) else (blockers or "")
+        text = (
+            f"# {row.get('title')} — {row.get('company')}\n\n"
+            f"job_url: {row.get('job_url')}\n"
+            f"llm reason: {result.get('reason')}\n"
+            f"llm blockers: {blockers_str}\n\n"
+            f"---\n\n{row.get('description') or ''}\n"
+        )
+        (dump_dir / f"{idx}.md").write_text(text, encoding="utf-8")
+        n += 1
+    if n:
+        print(f"[score] dumped {n} skipped posting description(s) to {dump_dir}/")
+
+
+def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -> pd.DataFrame:
+    client = make_llm_client()
+    cache = cache_load()
+    results: dict[int, dict] = {}
+    todo = []
+
+    dry_run = config.PREFILTER_DRY_RUN
+    flags: dict[int, str] = {}
+    n_blocked = 0
+
+    for idx, row in jobs.iterrows():
+        blocked = prefilter(row)
+        if blocked:
+            n_blocked += 1
+            flags[idx] = blocked
+            if not dry_run:
+                results[idx] = {"overall": 0, "stack_fit": 0, "seniority_fit": 0,
+                                "domain_fit": 0, "logistics_fit": 0, "verdict": "skip",
+                                "reason": "filtered out before scoring",
+                                "matched": [], "gaps": [], "blockers": [blocked]}
+                continue
+        key = cache_key(resume, row)
+        if key in cache:
+            results[idx] = cache[key]
+        else:
+            todo.append((idx, key, row))
+
+    if dry_run:
+        print(f"[score] PREFILTER_DRY_RUN: {n_blocked} posting(s) flagged but still "
+              f"being scored — compare prefilter_flag vs verdict in the CSV")
+    print(f"[score] {len(results)} from cache/filter, {len(todo)} to score with {MODEL}")
+    RUN_STATS.update(prefiltered=0 if dry_run else n_blocked,
+                     from_cache=len(results) - (0 if dry_run else n_blocked),
+                     llm_calls=len(todo))
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(score_one, client, resume, constraints, row): (idx, key)
+                for idx, key, row in todo
+            }
+            for n, future in enumerate(as_completed(futures), 1):
+                idx, key = futures[future]
+                result = future.result()
+                results[idx] = result
+                if result.get("overall", -1) >= 0:
+                    cache[key] = result
+                if n % 10 == 0 or n == len(todo):
+                    print(f"  scored {n}/{len(todo)}", flush=True)
+        cache_save(cache)
+
+    if getattr(config, "DUMP_SKIPPED_DESCRIPTIONS", False):
+        _dump_skipped_descriptions(jobs, results)
+
+    scored = pd.DataFrame.from_dict(results, orient="index")
+    for col in ("overall", "stack_fit", "seniority_fit", "domain_fit", "logistics_fit"):
+        if col not in scored.columns:
+            scored[col] = 0
+    for col in ("matched", "gaps", "blockers"):
+        scored[col] = scored[col].apply(lambda v: "; ".join(v) if isinstance(v, list) else "")
+
+    merged = jobs.join(scored)
+    if dry_run:
+        merged["prefilter_flag"] = pd.Series(flags)
+    return merged.sort_values("overall", ascending=False).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Output
+# --------------------------------------------------------------------------- #
+def append_history(df: pd.DataFrame, cols: list[str]) -> Path | None:
+    """Append this run's rows to output/history.csv, never overwriting it.
+
+    Adds a run_timestamp column so every run is distinguishable. Writes the
+    header only if the file doesn't exist yet. This file grows without bound
+    — nothing here prunes it. Returns the path written to, or None if
+    disabled via config.ENABLE_HISTORY_LOG.
+    """
+    if not config.ENABLE_HISTORY_LOG:
+        return None
+    history_path = OUT_DIR / config.HISTORY_FILENAME
+    run_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    hist = df.copy()
+    hist.insert(0, "run_timestamp", run_ts)
+    hist_cols = ["run_timestamp"] + cols
+
+    # If the column set changed since the file was created (e.g. a new column
+    # was added to the script), a blind append would misalign every column.
+    # Merge old and new rows under the combined header instead; old rows get
+    # empty values for columns that didn't exist yet.
+    if history_path.exists():
+        existing_cols = pd.read_csv(history_path, nrows=0).columns.tolist()
+        if existing_cols != hist_cols:
+            old = pd.read_csv(history_path)
+            merged = pd.concat([old, hist[hist_cols]], ignore_index=True)
+            # Current columns first, in the script's order, so the next run's
+            # header matches and takes the fast append path below.
+            all_cols = hist_cols + [c for c in old.columns if c not in hist_cols]
+            merged[all_cols].to_csv(history_path, index=False,
+                                    quoting=csv.QUOTE_NONNUMERIC, escapechar="\\")
+            return history_path
+
+    write_header = not history_path.exists()
+    hist[hist_cols].to_csv(history_path, mode="a", index=False, header=write_header,
+                           quoting=csv.QUOTE_NONNUMERIC, escapechar="\\")
+    return history_path
+
+
+def shortlist_meta(r) -> str:
+    """'linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract · Easy Apply'"""
+    parts = [str(r.get("site")), _str_or(r.get("li_location"), str(r.get("location")))]
+    days = r.get("days_old")
+    if days is not None and not pd.isna(days):
+        parts.append("today" if int(days) == 0 else f"{int(days)} day{'s' if int(days) != 1 else ''} old")
+    elif r.get("date_posted") is not None and not pd.isna(r.get("date_posted")):
+        parts.append(str(r.get("date_posted")))
+    if _str_or(r.get("applicants_text"), ""):
+        parts.append(r["applicants_text"])
+    if _str_or(r.get("employment_type"), ""):
+        parts.append(r["employment_type"])
+    easy = r.get("easy_apply")
+    if easy is not None and not pd.isna(easy):
+        parts.append("Easy Apply" if easy else "Apply on company site")
+    return " · ".join(parts)
+
+
+def fmt_duration(seconds: float) -> str:
+    """3 -> '3s', 252 -> '4m 12s', 3725 -> '1h 2m 5s'."""
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s" if m else f"{s}s"
+
+
+class step_timer:
+    """`with step_timer("scrape"):` prints '[time] scrape: 4m 12s' when the step
+    ends and records it in RUN_STATS["timings"]."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __enter__(self):
+        self.start = time.monotonic()
+        return self
+
+    def __exit__(self, *exc):
+        elapsed = time.monotonic() - self.start
+        RUN_STATS.setdefault("timings", {})[self.name] = elapsed
+        print(f"[time] {self.name}: {fmt_duration(elapsed)}", flush=True)
+        return False
+
+
+def run_metrics_lines(counts: dict, shortlisted: int) -> list[str]:
+    """Markdown 'Run metrics' section for the bottom of each shortlist file.
+    Timings cover the whole run; counts/shortlisted are for that file's site."""
+    s = RUN_STATS
+    timings = s.get("timings", {})
+    lines = ["---", "", "## Run metrics", "",
+             f"Run finished {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+             f"provider {PROVIDER} · model {MODEL}", "",
+             "| Step | Time | Details |", "|---|---|---|"]
+    details = {
+        f"scrape {name}": f"{rows} rows; {s.get('source_notes', {}).get(name, '')}".rstrip("; ")
+        for name, rows in s.get("rows_by_source", {}).items()
+    }
+    details["scoring"] = (f"{s.get('rows_scraped', '?')} rows → {s.get('unique_postings', '?')} "
+                          f"unique postings; {s.get('prefiltered', 0)} filtered free, "
+                          f"{s.get('from_cache', 0)} from cache, {s.get('llm_calls', 0)} LLM calls")
+    for name, elapsed in timings.items():
+        if name == "total_so_far":
+            continue
+        lines.append(f"| {name} | {fmt_duration(elapsed)} | {details.get(name, '')} |")
+    verdicts = ", ".join(f"{n} {v}" for v, n in counts.items())
+    total = timings.get("total_so_far")
+    lines.append(f"| **total** | **{fmt_duration(total) if total is not None else '?'}** | "
+                 f"{verdicts} · {shortlisted} shortlisted |")
+    return lines + [""]
+
+
+def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str]) -> list[str]:
+    """Markdown shortlist for one site's rows (already sorted best first)."""
+    shortlist = df[df["passes_threshold"]].head(top)
+    by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
+    lines = [f"# {site} shortlist — top {len(shortlist)} of {len(df)} postings "
+             f"(overall >= {config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT}; "
+             + ", ".join(f"{by_verdict.get(v, 0)} {v}" for v in verdicts) + ")\n"]
+    for _, r in shortlist.iterrows():
+        lines.append(f"## {r['overall']} · {r['title']} — {_str_or(r.get('company'), 'company not listed')}")
+        lines.append(f"*{shortlist_meta(r)}* · [posting]({r['job_url']})")
+        if _flag(r.get("likely_onsite")):
+            lines.append("**Check workplace badge** — city-level location and no explicit "
+                         "fully-remote statement; may be On-site/Hybrid.")
+        lines.append(f"**{str(r['verdict']).upper()}** — {r['reason']}")
+        if r["blockers"]:
+            lines.append(f"- Blockers: {r['blockers']}")
+        if r["matched"]:
+            lines.append(f"- Matches: {r['matched']}")
+        if r["gaps"]:
+            lines.append(f"- Gaps: {r['gaps']}")
+        lines.append("")
+    lines += run_metrics_lines(counts=df["verdict"].value_counts().to_dict(), shortlisted=len(shortlist))
+    return lines
+
+
+def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
+    """One jobs_scored_<site>.csv + shortlist_<site>.md per site this run
+    scraped (so a single-site run leaves other sites' files alone), plus one
+    append to the shared history.csv."""
+    OUT_DIR.mkdir(exist_ok=True)
+
+    df = df.copy()
+    verdicts = [v.lower() for v in getattr(config, "SHORTLIST_VERDICTS", ["apply", "maybe"])]
+    df["passes_threshold"] = (
+        (df["overall"] >= config.MIN_OVERALL_SCORE)
+        & (df["stack_fit"] >= config.MIN_SKILL_MATCH_PERCENT)
+        & df["verdict"].astype(str).str.lower().isin(verdicts)
+    )
+
+    cols = ["overall", "passes_threshold", "verdict", "title", "company", "site",
+            "location", "search_location", "employment_type", "seniority_level", "date_posted",
+            "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
+            "likely_onsite", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
+    cols = [c for c in cols if c in df.columns]
+    history_path = append_history(df, cols) if len(df) else None
+
+    print(f"\n[done] {df['verdict'].value_counts().to_dict()}")
+    site_col = df["site"].astype(str).str.lower()
+    for site in sites:
+        site_df = df[site_col == site]
+        csv_path = OUT_DIR / f"jobs_scored_{site}.csv"
+        md_path = OUT_DIR / f"shortlist_{site}.md"
+        # Written even when the site returned nothing, so the file never shows
+        # a previous run's postings as if they were current.
+        site_df[cols].to_csv(csv_path, index=False, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\")
+        md_path.write_text("\n".join(shortlist_lines(site_df, site, top, verdicts)), encoding="utf-8")
+        n_short = min(int(site_df["passes_threshold"].sum()), top)
+        print(f"       {site}: {len(site_df)} postings, {n_short} shortlisted → {md_path}, {csv_path}")
+    if history_path:
+        print(f"       {history_path} (appended, {len(df)} rows this run)")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--resume", help="resume file (.md/.txt/.pdf/.docx); "
+                                     "falls back to config.CANDIDATE_PROFILE if omitted")
+    ap.add_argument("--constraints", help="text file describing your hard requirements; "
+                                          "falls back to config.CONSTRAINTS if omitted")
+    ap.add_argument("--terms", nargs="+", default=config.SEARCH_TERMS)
+    ap.add_argument("--locations", nargs="+", default=None,
+                    help='locations for every site in this run, e.g. "United States" MENA '
+                         '(LinkedIn/Indeed) or gaza-jobs (jobs.ps); pair with --sites. '
+                         'Defaults to config.SITE_LOCATIONS per site')
+    ap.add_argument("--remote", action=argparse.BooleanOptionalAction, default=None,
+                    help="remote-only for every site in this run; defaults to "
+                         "config.SITE_REMOTE_ONLY per site, else config.IS_REMOTE")
+    ap.add_argument("--hours", type=int, default=config.HOURS_OLD, help="max posting age in hours")
+    ap.add_argument("--results", type=int, default=config.RESULTS_PER_BOARD,
+                    help="results per site per term")
+    ap.add_argument("--top", type=int, default=config.TOP_N_REPORT,
+                    help="how many to put in the report")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="parallel scoring calls; defaults to config.WORKERS "
+                         "(config.GEMINI_WORKERS when scoring with Gemini)")
+    ap.add_argument("--delay", type=float, default=config.SEARCH_DELAY_SECONDS,
+                    help="seconds between search terms")
+    ap.add_argument("--proxies", nargs="*", default=[], help="user:pass@host:port …")
+    ap.add_argument("--sites", nargs="+", choices=list(REGISTRY),
+                    default=getattr(config, "SOURCES", list(REGISTRY)),
+                    help="which job sites to search this run; defaults to config.SOURCES")
+    ap.add_argument("--provider", choices=["openrouter", "gemini"], default=None,
+                    help="which API scores postings for this run only; overrides "
+                         "LLM_PROVIDER in .env and config.LLM_PROVIDER")
+    args = ap.parse_args()
+
+    global PROVIDER, MODEL
+    if args.provider:
+        PROVIDER, MODEL = resolve_provider_and_model(args.provider)
+    site_remote = getattr(config, "SITE_REMOTE_ONLY", {})
+    SITE_REMOTE_ONLY.update({site: args.remote if args.remote is not None
+                             else site_remote.get(site, config.IS_REMOTE)
+                             for site in args.sites})
+    args.site_remote_only = SITE_REMOTE_ONLY
+    # Each site's locations: --locations for all of them if passed, else that
+    # site's entry in config.SITE_LOCATIONS, else config.LOCATIONS.
+    site_defaults = getattr(config, "SITE_LOCATIONS", {})
+    args.site_locations = {site: args.locations or site_defaults.get(site, config.LOCATIONS)
+                           for site in args.sites}
+
+    if args.workers is None:
+        # Gemini's free tier enforces a per-minute request cap far below
+        # OpenRouter's — config.WORKERS (tuned for OpenRouter) would blast
+        # through it in one batch and immediately 429 every call. Only used
+        # when --workers wasn't passed explicitly, so a manual override
+        # always wins.
+        args.workers = getattr(config, "GEMINI_WORKERS", 1) if PROVIDER == "gemini" else config.WORKERS
+
+    if PROVIDER == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
+        sys.exit("OPENROUTER_API_KEY is not set.")
+    if PROVIDER == "gemini" and not os.getenv("GEMINI_API_KEY"):
+        sys.exit("GEMINI_API_KEY is not set (required when --provider/LLM_PROVIDER=gemini).")
+    print(f"[config] provider={PROVIDER}, model={MODEL}")
+
+    resume = load_resume(args.resume)
+    if not args.resume:
+        print("[warn] no --resume passed, using config.CANDIDATE_PROFILE (a short summary) — "
+              "scores will be less accurate than with a full resume", file=sys.stderr)
+    constraints = load_constraints(args.constraints)
+    if constraints.lstrip().startswith("EXAMPLE"):
+        print("[warn] using the EXAMPLE constraints from config.py — put your real "
+              "CONSTRAINTS in config_local.py (see README)", file=sys.stderr)
+    run_start = time.monotonic()
+    for site in args.sites:
+        print(f"[config] {site}: {', '.join(args.site_locations[site]) or '(no locations)'}"
+              f"{' · remote only' if SITE_REMOTE_ONLY[site] else ' · on-site allowed'}")
+    jobs = fetch_jobs(args)  # times each site as "scrape <site>"
+    if jobs.empty:
+        # Still rewrite each site's files (empty), so they don't keep showing
+        # the previous run's postings as current.
+        print("[scrape] no postings returned. Try a longer --hours window, other "
+              "locations/terms, or proxies.", file=sys.stderr)
+        empty = jobs.reindex(columns=list(jobs.columns) + [
+            "overall", "stack_fit", "verdict", "reason", "blockers", "matched", "gaps"])
+        RUN_STATS.setdefault("timings", {})["total_so_far"] = time.monotonic() - run_start
+        write_outputs(empty, args.top, args.sites)
+        return
+    with step_timer("scoring"):
+        scored = score_all(jobs, resume, constraints, args.workers)
+    # Total is recorded before writing so it can go into the shortlists; writing
+    # the files takes well under a second.
+    RUN_STATS.setdefault("timings", {})["total_so_far"] = time.monotonic() - run_start
+    write_outputs(scored, args.top, args.sites)
+    print(f"[time] total: {fmt_duration(time.monotonic() - run_start)}")
+
+
+if __name__ == "__main__":
+    main()

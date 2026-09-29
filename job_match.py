@@ -305,14 +305,33 @@ def cache_save(cache: dict) -> None:
     CACHE_PATH.write_text(json.dumps(cache, indent=0))
 
 
-def cache_key(resume: str, row) -> str:
+def constraints_for(site, base: str) -> str:
+    """base constraints plus this site's config.SITE_EXTRA_CONSTRAINTS entry, if any."""
+    extra = getattr(config, "SITE_EXTRA_CONSTRAINTS", {}).get(str(site).lower())
+    return f"{base.rstrip()}\n\n{extra.strip()}\n" if extra else base
+
+
+def min_scores(site) -> tuple[int, int]:
+    """(min overall, min stack_fit) for one site: its SITE_MIN_* entry, else the global."""
+    site = str(site).lower()
+    return (getattr(config, "SITE_MIN_OVERALL_SCORE", {}).get(site, config.MIN_OVERALL_SCORE),
+            getattr(config, "SITE_MIN_SKILL_MATCH_PERCENT", {}).get(site, config.MIN_SKILL_MATCH_PERCENT))
+
+
+def thresholds_text(site) -> str:
+    overall, stack = min_scores(site)
+    return f"overall >= {overall}, stack_fit >= {stack}"
+
+
+def cache_key(resume: str, constraints: str, row) -> str:
     # PROVIDER is part of the key too: the same model NAME can mean different
     # things (or the two providers can drift), and a stale cross-provider hit
     # would silently reuse a score from the other API.
     # likely_onsite changes the prompt (see workplace_check), so it's part of
     # the key: a posting whose flag flips gets re-scored instead of reusing a
-    # score made without the warning.
-    blob = (f"{resume}|{PROVIDER}|{MODEL}|{row.get('job_url')}|{row.get('title')}|"
+    # score made without the warning. Constraints (with any per-site extra)
+    # are in it so editing them re-scores the postings they apply to.
+    blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{row.get('job_url')}|{row.get('title')}|"
             f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}")
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -505,12 +524,13 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
                                 "reason": "filtered out before scoring",
                                 "matched": [], "gaps": [], "blockers": [blocked]}
                 continue
-        key = cache_key(resume, row)
+        row_constraints = constraints_for(row.get("site"), constraints)
+        key = cache_key(resume, row_constraints, row)
         if key in cache:
             results[idx] = cache[key]
             via[idx] = "from_cache"
         else:
-            todo.append((idx, key, row))
+            todo.append((idx, key, row_constraints, row))
             via[idx] = "llm_calls"
 
     if dry_run:
@@ -531,8 +551,8 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
     if todo:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(score_one, client, resume, constraints, row): (idx, key)
-                for idx, key, row in todo
+                pool.submit(score_one, client, resume, row_constraints, row): (idx, key)
+                for idx, key, row_constraints, row in todo
             }
             for n, future in enumerate(as_completed(futures), 1):
                 idx, key = futures[future]
@@ -743,7 +763,7 @@ def run_metrics_lines(site: str, f: dict, top: int, verdicts: list[str]) -> list
              f"| verdict filter | — | {f['to_score']} | {f['verdict_ok']} | "
              f"keeps {'/'.join(verdicts)} only |",
              f"| score thresholds | — | {f['verdict_ok']} | {f['passed']} | "
-             f"overall >= {config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT} |",
+             f"{thresholds_text(site)} |",
              f"| shortlist | — | {f['passed']} | {f['shortlisted']} | top {top} kept |",
              f"| **total** | **{_total_time()}** (whole run) | **{f['scraped']}** | "
              f"**{f['shortlisted']}** | {f['scraped']} scraped → {f['shortlisted']} shortlisted |"]
@@ -785,9 +805,9 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
             ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted")]
     lines = ["# Run summary", "", _run_header(), "",
              run_summary_paragraph(funnels, verdicts), "",
-             f"Boards: {', '.join(funnels) or '(none)'} · thresholds: overall >= "
-             f"{config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT} · "
-             f"top {top} per board", "",
+             f"Boards: {', '.join(funnels) or '(none)'} · thresholds: "
+             + "; ".join(f"{site} {thresholds_text(site)}" for site in funnels)
+             + f" · top {top} per board", "",
              "## Postings through each step", "",
              "| Board | " + " | ".join(label for _, label in cols) + " |",
              "|---|" + "---:|" * len(cols)]
@@ -819,7 +839,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
     shortlist = df[df["passes_threshold"]].head(top)
     by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
     lines = [f"# {site} shortlist — top {len(shortlist)} of {len(df)} postings "
-             f"(overall >= {config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT}; "
+             f"({thresholds_text(site)}; "
              + ", ".join(f"{by_verdict.get(v, 0)} {v}" for v in verdicts) + ")\n"]
     for _, r in shortlist.iterrows():
         lines.append(f"## {r['overall']} · {r['title']} — {_str_or(r.get('company'), 'company not listed')}")
@@ -847,9 +867,11 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
 
     df = df.copy()
     verdicts = [v.lower() for v in getattr(config, "SHORTLIST_VERDICTS", ["apply", "maybe"])]
+    min_overall = df["site"].map(lambda site: min_scores(site)[0])
+    min_stack = df["site"].map(lambda site: min_scores(site)[1])
     df["passes_threshold"] = (
-        (df["overall"] >= config.MIN_OVERALL_SCORE)
-        & (df["stack_fit"] >= config.MIN_SKILL_MATCH_PERCENT)
+        (df["overall"] >= min_overall)
+        & (df["stack_fit"] >= min_stack)
         & df["verdict"].astype(str).str.lower().isin(verdicts)
     )
 

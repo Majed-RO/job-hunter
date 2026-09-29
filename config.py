@@ -77,6 +77,14 @@ SITE_REMOTE_ONLY = {
     "jobsps": False,
 }
 
+# Per-site text appended to CONSTRAINTS when scoring that site's postings, e.g.
+# to widen the target roles on a local board only. Changing it re-scores that
+# site's postings (constraints are part of the score cache key). EXAMPLE:
+#   SITE_EXTRA_CONSTRAINTS = {"jobsps": "On this board the candidate is ALSO "
+#                             "targeting <other role types>."}
+# Put the real text in config_local.py.
+SITE_EXTRA_CONSTRAINTS: dict[str, str] = {}
+
 # Which job sites to search. Valid names: "linkedin", "indeed", "jobsps", "weworkremotely"
 # (one module each under sources/). --sites overrides this for one run, e.g.
 # `python job_match.py --sites jobsps`. Each site gets its own
@@ -134,7 +142,10 @@ JOBSPS_CATEGORIES = [
   "business-administration-jobs",
   "engineering-jobs",
   "customer-service-and-support-jobs",
-  "science-and-research-jobs"
+  "science-and-research-jobs",
+  "operations-jobs",
+  "development-economic-jobs",
+  "education-training-jobs",
 ]
 JOBSPS_MAX_PER_FEED = 30         # cap on each RSS feed read, belt-and-suspenders
 JOBSPS_DETAIL_DELAY_SECONDS = 1.0
@@ -262,6 +273,13 @@ PREFILTER_DRY_RUN = False
 # --- Post-scoring filter (applied to the LLM's output) ---
 MIN_OVERALL_SCORE = 67         # postings below this "overall" score are excluded from shortlist.md
 MIN_SKILL_MATCH_PERCENT = 75   # same, applied to the LLM's "stack_fit" score
+# Per-site overrides of the two scores above; sites not listed use them as-is.
+# jobs.ps also targets admin/coordination roles (SITE_EXTRA_CONSTRAINTS), whose
+# "stack" is office/coordination skills, so stack_fit is a weaker signal there.
+SITE_MIN_OVERALL_SCORE: dict[str, int] = {}
+SITE_MIN_SKILL_MATCH_PERCENT: dict[str, int] = {
+    "jobsps": 50,
+}
 # Which LLM verdicts may appear in shortlist.md (still subject to both scores
 # above). "skip" is never shortlisted, even if its score clears the bar.
 SHORTLIST_VERDICTS = ["apply", "maybe"]

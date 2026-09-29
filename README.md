@@ -176,7 +176,7 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `MIN_OVERALL_SCORE` | Postings below this `overall` score (0–100, from the LLM) are excluded from the shortlists. Still appear in the CSV. Currently 67 — low enough that solid "maybe" postings (typically ~72) make the shortlist. |
 | `SHORTLIST_VERDICTS` | Which LLM verdicts can appear in the shortlists: `["apply", "maybe"]`. A "skip" is never shortlisted even if its score clears the bar. |
 | `MIN_SKILL_MATCH_PERCENT` | Same, applied to the LLM's `stack_fit` sub-score. |
-| `SITE_MIN_OVERALL_SCORE` / `SITE_MIN_SKILL_MATCH_PERCENT` | Per-site overrides of the two thresholds above, e.g. `{"jobsps": 50}`. Sites not listed use the global value. Each shortlist and the run summary print the thresholds actually used for that site. |
+| `SITE_MIN_OVERALL_SCORE` / `SITE_MIN_SKILL_MATCH_PERCENT` | Per-site overrides of the two thresholds above, e.g. `{"jobsps": 0}`. Sites not listed use the global value. Each shortlist and the run summary print the thresholds actually used for that site. |
 | `DUMP_SKIPPED_DESCRIPTIONS` | `True` writes every LLM-verdicted `skip` posting's full description to `output/skipped_descriptions/<row>.md`, alongside the LLM's reason/blockers — useful for checking a blocker regex against the real posting text instead of the LLM's paraphrase. `False` by default (one file per skip). |
 
 ### LLM engine

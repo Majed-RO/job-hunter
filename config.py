@@ -274,11 +274,13 @@ PREFILTER_DRY_RUN = False
 MIN_OVERALL_SCORE = 67         # postings below this "overall" score are excluded from shortlist.md
 MIN_SKILL_MATCH_PERCENT = 75   # same, applied to the LLM's "stack_fit" score
 # Per-site overrides of the two scores above; sites not listed use them as-is.
-# jobs.ps also targets admin/coordination roles (SITE_EXTRA_CONSTRAINTS), whose
-# "stack" is office/coordination skills, so stack_fit is a weaker signal there.
+# jobs.ps also targets admin/coordination roles (SITE_EXTRA_CONSTRAINTS). The
+# LLM still scores stack_fit against the web stack for some of those (an
+# "apply" at overall 72 got stack_fit 0), so jobs.ps doesn't gate on it:
+# overall + verdict decide there.
 SITE_MIN_OVERALL_SCORE: dict[str, int] = {}
 SITE_MIN_SKILL_MATCH_PERCENT: dict[str, int] = {
-    "jobsps": 50,
+    "jobsps": 0,
 }
 # Which LLM verdicts may appear in shortlist.md (still subject to both scores
 # above). "skip" is never shortlisted, even if its score clears the bar.

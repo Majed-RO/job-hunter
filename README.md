@@ -8,6 +8,7 @@ sorted, filtered shortlist per site.
 resume + constraints ──▶ sources/<site>.py scrape ──▶ deterministic pre-filter ──▶
 LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<site>.csv
                                                      ├──▶ output/shortlist_<site>.md
+                                                     ├──▶ output/run_summary.md (all sites)
                                                      └──▶ output/history.csv (all sites)
 ```
 
@@ -312,11 +313,20 @@ matched skills, gaps, and any blockers for each. Each entry's first line
 reads like `linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract
 · Easy Apply`, and `likely_onsite` postings get a **Check workplace badge**
 line — open those and look at the On-site/Remote/Hybrid badge before applying.
-The file ends with a **Run metrics** table: time taken by each step
-for the whole run (scrape per site, scoring, total) with counts — searches run,
-postings found, pages fetched/failed, how many were filtered for free vs
-served from cache vs sent to the LLM. The terminal prints each step's time
-as a `[time]` line as it finishes.
+The file ends with a **Run metrics** section for that site only: a short
+paragraph describing the run, then a table of each step (scrape, dedupe,
+pre-filter, LLM scoring, verdict filter, score thresholds, shortlist) with how many of
+the site's postings went in and came out, plus its time and details — searches
+run, pages fetched/failed, how many were served from cache vs sent to the LLM,
+and the apply/maybe/skip split. Scoring runs once for all sites together, so
+its time is the whole run's, as is the total time in the last row. The terminal prints each step's time as a
+`[time]` line as it finishes.
+
+**`output/run_summary.md`** — rewritten every run: a short paragraph on the
+whole run, then one row per site searched
+(scraped, unique, pre-filtered, scored, from cache, LLM calls, apply, maybe,
+skip, failed, apply/maybe, passed thresholds, shortlisted) with an all-boards total, then
+the time of every step in the run.
 
 **`output/history.csv`** — append-only log across every run, with a
 `run_timestamp` column added as the first column, shared by all sites

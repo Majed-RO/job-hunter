@@ -41,6 +41,7 @@ Outputs (paths set by config.OUTPUT_DIR / config.CACHE_PATH):
     output/shortlist_<site>.md     that site's postings that clear config's thresholds, best first
                                    (both rewritten only for the sites searched in a run, so a
                                    --sites jobsps run leaves the LinkedIn/Indeed files alone)
+    output/run_summary.md          this run's per-site counts at each step, plus step timings
     output/history.csv             every run's rows from all sites, appended with a run_timestamp
                                    column — never overwritten
     .jobcache/scores.json    score cache, so re-runs only pay for new postings
@@ -231,7 +232,8 @@ def fetch_jobs(args) -> pd.DataFrame:
     before = len(jobs)
     jobs = jobs.drop_duplicates(subset=["job_url"]).drop_duplicates(subset=["dedupe_key"])
     print(f"[scrape] {before} rows → {len(jobs)} unique postings")
-    RUN_STATS.update(rows_scraped=before, unique_postings=len(jobs))
+    RUN_STATS.update(rows_scraped=before, unique_postings=len(jobs),
+                     unique_by_source=jobs["site"].astype(str).str.lower().value_counts().to_dict())
     return jobs.reset_index(drop=True)
 
 
@@ -489,6 +491,7 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
     dry_run = config.PREFILTER_DRY_RUN
     flags: dict[int, str] = {}
     n_blocked = 0
+    via: dict[int, str] = {}  # idx -> "prefiltered" / "from_cache" / "llm_calls", for per-site metrics
 
     for idx, row in jobs.iterrows():
         blocked = prefilter(row)
@@ -496,6 +499,7 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
             n_blocked += 1
             flags[idx] = blocked
             if not dry_run:
+                via[idx] = "prefiltered"
                 results[idx] = {"overall": 0, "stack_fit": 0, "seniority_fit": 0,
                                 "domain_fit": 0, "logistics_fit": 0, "verdict": "skip",
                                 "reason": "filtered out before scoring",
@@ -504,8 +508,10 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
         key = cache_key(resume, row)
         if key in cache:
             results[idx] = cache[key]
+            via[idx] = "from_cache"
         else:
             todo.append((idx, key, row))
+            via[idx] = "llm_calls"
 
     if dry_run:
         print(f"[score] PREFILTER_DRY_RUN: {n_blocked} posting(s) flagged but still "
@@ -514,6 +520,13 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
     RUN_STATS.update(prefiltered=0 if dry_run else n_blocked,
                      from_cache=len(results) - (0 if dry_run else n_blocked),
                      llm_calls=len(todo))
+    by_site = RUN_STATS.setdefault("scoring_by_source", {})
+    sites = jobs["site"].astype(str).str.lower()
+    for idx, how in via.items():
+        counts = by_site.setdefault(sites[idx], {"flagged": 0})
+        counts[how] = counts.get(how, 0) + 1
+    for idx in flags:
+        by_site.setdefault(sites[idx], {"flagged": 0})["flagged"] += 1
 
     if todo:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -635,34 +648,173 @@ class step_timer:
         return False
 
 
-def run_metrics_lines(counts: dict, shortlisted: int) -> list[str]:
-    """Markdown 'Run metrics' section for the bottom of each shortlist file.
-    Timings cover the whole run; counts/shortlisted are for that file's site."""
+def _run_header() -> str:
+    return (f"Run finished {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+            f"provider {PROVIDER} · model {MODEL}")
+
+
+def _scrape_details(site: str) -> str:
+    return RUN_STATS.get("source_notes", {}).get(site, "")
+
+
+def _fmt_time(name: str) -> str:
+    elapsed = RUN_STATS.get("timings", {}).get(name)
+    return fmt_duration(elapsed) if elapsed is not None else "—"
+
+
+def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> dict:
+    """How many of one site's postings made it through each step this run.
+    df is that site's rows of the scored table (with passes_threshold)."""
     s = RUN_STATS
-    timings = s.get("timings", {})
-    lines = ["---", "", "## Run metrics", "",
-             f"Run finished {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-             f"provider {PROVIDER} · model {MODEL}", "",
-             "| Step | Time | Details |", "|---|---|---|"]
-    details = {
-        f"scrape {name}": f"{rows} rows; {s.get('source_notes', {}).get(name, '')}".rstrip("; ")
-        for name, rows in s.get("rows_by_source", {}).items()
+    scoring = s.get("scoring_by_source", {}).get(site, {})
+    by_verdict = df["verdict"].astype(str).str.lower().value_counts().to_dict() if len(df) else {}
+    unique = s.get("unique_by_source", {}).get(site, len(df))
+    prefiltered = scoring.get("prefiltered", 0)
+    passed = int(df["passes_threshold"].sum()) if len(df) else 0
+    return {
+        "scraped": s.get("rows_by_source", {}).get(site, 0),
+        "unique": unique,
+        "prefiltered": prefiltered,
+        "flagged": scoring.get("flagged", 0),
+        "to_score": unique - prefiltered,
+        "from_cache": scoring.get("from_cache", 0),
+        "llm_calls": scoring.get("llm_calls", 0),
+        "apply": by_verdict.get("apply", 0),
+        "maybe": by_verdict.get("maybe", 0),
+        "skip": by_verdict.get("skip", 0) - prefiltered,  # the LLM's skips; pre-filtered counted above
+        "error": by_verdict.get("error", 0),
+        "verdict_ok": sum(by_verdict.get(v, 0) for v in verdicts),
+        "passed": passed,
+        "shortlisted": min(passed, top),
     }
-    details["scoring"] = (f"{s.get('rows_scraped', '?')} rows → {s.get('unique_postings', '?')} "
-                          f"unique postings; {s.get('prefiltered', 0)} filtered free, "
-                          f"{s.get('from_cache', 0)} from cache, {s.get('llm_calls', 0)} LLM calls")
-    for name, elapsed in timings.items():
-        if name == "total_so_far":
-            continue
-        lines.append(f"| {name} | {fmt_duration(elapsed)} | {details.get(name, '')} |")
-    verdicts = ", ".join(f"{n} {v}" for v, n in counts.items())
-    total = timings.get("total_so_far")
-    lines.append(f"| **total** | **{fmt_duration(total) if total is not None else '?'}** | "
-                 f"{verdicts} · {shortlisted} shortlisted |")
+
+
+def _total_time() -> str:
+    total = RUN_STATS.get("timings", {}).get("total_so_far")
+    return fmt_duration(total) if total is not None else "?"
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def site_paragraph(site: str, f: dict, top: int, verdicts: list[str]) -> str:
+    """One plain-English paragraph on what happened to one site's postings."""
+    if not f["scraped"]:
+        return (f"{site} returned no postings this run ({_scrape_details(site) or 'no details'}), "
+                f"so nothing was scored or shortlisted.")
+    text = (f"{site} returned {_plural(f['scraped'], 'posting')} in {_fmt_time(f'scrape {site}')}; "
+            f"{f['scraped'] - f['unique']} were duplicates, leaving {f['unique']} unique. ")
+    if f["prefiltered"]:
+        text += (f"The free pre-filter removed {f['prefiltered']}, so {f['to_score']} "
+                 f"went to scoring ")
+    else:
+        text += f"All {f['to_score']} went to scoring "
+    text += (f"({f['from_cache']} from cache, {_plural(f['llm_calls'], 'new LLM call')}). "
+             f"The LLM rated {f['apply']} apply, {f['maybe']} maybe and {f['skip']} skip"
+             + (f", and {f['error']} failed to score" if f["error"] else "") + ". ")
+    if not f["verdict_ok"]:
+        text += f"With no {'/'.join(verdicts)} verdicts, nothing was shortlisted."
+    else:
+        text += (f"Of the {f['verdict_ok']} rated {'/'.join(verdicts)}, {f['passed']} "
+                 f"cleared the score thresholds")
+        text += (f", and the top {top} of those were shortlisted." if f["passed"] > top
+                 else f", so {f['shortlisted']} {'is' if f['shortlisted'] == 1 else 'are'} shortlisted.")
+    return text
+
+
+def run_metrics_lines(site: str, f: dict, top: int, verdicts: list[str]) -> list[str]:
+    """Markdown 'Run metrics' section for the bottom of one site's shortlist:
+    that site's postings in and out of each step, from scrape to shortlist."""
+    dry_run_note = (f"dry run: {f['flagged']} flagged but still scored"
+                    if config.PREFILTER_DRY_RUN else "title/blocker/age/applicant rules, no LLM")
+    lines = ["---", "", f"## Run metrics — {site}", "", _run_header(), "",
+             site_paragraph(site, f, top, verdicts), "",
+             "| Step | Time | In | Out | Details |", "|---|---|---:|---:|---|",
+             f"| scrape | {_fmt_time(f'scrape {site}')} | — | {f['scraped']} | {_scrape_details(site)} |",
+             f"| dedupe | — | {f['scraped']} | {f['unique']} | "
+             f"{f['scraped'] - f['unique']} duplicate(s) dropped (same URL, or same title + company) |",
+             f"| pre-filter | — | {f['unique']} | {f['to_score']} | "
+             f"{f['prefiltered']} filtered out; {dry_run_note} |",
+             f"| LLM scoring | {_fmt_time('scoring')} (all boards) | {f['to_score']} | {f['to_score']} | "
+             f"{f['from_cache']} from cache, {f['llm_calls']} LLM calls · "
+             f"{f['apply']} apply, {f['maybe']} maybe, {f['skip']} skip"
+             + (f", {f['error']} failed" if f["error"] else "") + " |",
+             f"| verdict filter | — | {f['to_score']} | {f['verdict_ok']} | "
+             f"keeps {'/'.join(verdicts)} only |",
+             f"| score thresholds | — | {f['verdict_ok']} | {f['passed']} | "
+             f"overall >= {config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT} |",
+             f"| shortlist | — | {f['passed']} | {f['shortlisted']} | top {top} kept |",
+             f"| **total** | **{_total_time()}** (whole run) | **{f['scraped']}** | "
+             f"**{f['shortlisted']}** | {f['scraped']} scraped → {f['shortlisted']} shortlisted |"]
     return lines + [""]
 
 
-def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str]) -> list[str]:
+def run_summary_paragraph(funnels: dict[str, dict], verdicts: list[str]) -> str:
+    """One plain-English paragraph on the whole run, all boards together."""
+    t = {k: sum(f[k] for f in funnels.values()) for k in next(iter(funnels.values()), {})}
+    if not t.get("scraped"):
+        return (f"This run searched {', '.join(funnels) or 'no boards'} in {_total_time()} "
+                f"and found no postings.")
+    per_board = ", ".join(f"{site} {f['scraped']}" for site, f in funnels.items())
+    text = (f"This run took {_total_time()} and searched {len(funnels)} "
+            f"board{'' if len(funnels) == 1 else 's'}, collecting {t['scraped']} postings "
+            f"({per_board}). After dedupe {t['unique']} were unique; the pre-filter removed "
+            f"{t['prefiltered']} and {t['to_score']} were scored ({t['from_cache']} from cache, "
+            f"{_plural(t['llm_calls'], 'new LLM call')}, {_fmt_time('scoring')}). "
+            f"The LLM rated {t['apply']} apply, {t['maybe']} maybe and {t['skip']} skip"
+            + (f", with {_plural(t['error'], 'failure')}" if t["error"] else "") + ". ")
+    if t["shortlisted"]:
+        by_board = ", ".join(f"{site} {f['shortlisted']}" for site, f in funnels.items()
+                             if f["shortlisted"])
+        text += (f"{t['passed']} cleared the score thresholds and {t['shortlisted']} "
+                 f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted ({by_board}).")
+    else:
+        text += "None cleared the score thresholds, so every shortlist is empty."
+    return text
+
+
+def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -> list[str]:
+    """Markdown for output/run_summary.md: every site searched this run side
+    by side, plus the run's step timings."""
+    s = RUN_STATS
+    cols = [("scraped", "Scraped"), ("unique", "Unique"), ("prefiltered", "Pre-filtered"),
+            ("to_score", "Scored"), ("from_cache", "From cache"), ("llm_calls", "LLM calls"),
+            ("apply", "Apply"), ("maybe", "Maybe"), ("skip", "Skip"), ("error", "Failed"),
+            ("verdict_ok", "/".join(v.capitalize() for v in verdicts)),
+            ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted")]
+    lines = ["# Run summary", "", _run_header(), "",
+             run_summary_paragraph(funnels, verdicts), "",
+             f"Boards: {', '.join(funnels) or '(none)'} · thresholds: overall >= "
+             f"{config.MIN_OVERALL_SCORE}, stack_fit >= {config.MIN_SKILL_MATCH_PERCENT} · "
+             f"top {top} per board", "",
+             "## Postings through each step", "",
+             "| Board | " + " | ".join(label for _, label in cols) + " |",
+             "|---|" + "---:|" * len(cols)]
+    for site, f in funnels.items():
+        lines.append(f"| [{site}](shortlist_{site}.md) | " + " | ".join(str(f[k]) for k, _ in cols) + " |")
+    lines.append("| **all boards** | " + " | ".join(
+        f"**{sum(f[k] for f in funnels.values())}**" for k, _ in cols) + " |")
+    if config.PREFILTER_DRY_RUN:
+        lines += ["", "PREFILTER_DRY_RUN is on: flagged postings were still scored, so "
+                      "Pre-filtered is 0 — see prefilter_flag in the CSVs."]
+    lines += ["", "Unique counts dedupe across boards too: a posting found on two boards "
+                  "is kept once, under whichever board returned it first.", "",
+              "## Time per step", "", "| Step | Time | Details |", "|---|---|---|"]
+    for name, elapsed in s.get("timings", {}).items():
+        if name == "total_so_far":
+            continue
+        details = _scrape_details(name.removeprefix("scrape ")) if name.startswith("scrape ") else (
+            f"{s.get('rows_scraped', 0)} rows → {s.get('unique_postings', 0)} unique; "
+            f"{s.get('prefiltered', 0)} filtered free, {s.get('from_cache', 0)} from cache, "
+            f"{s.get('llm_calls', 0)} LLM calls" if name == "scoring" else "")
+        lines.append(f"| {name} | {fmt_duration(elapsed)} | {details} |")
+    lines.append(f"| **total** | **{_total_time()}** | |")
+    return lines + [""]
+
+
+def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
+                    funnel: dict) -> list[str]:
     """Markdown shortlist for one site's rows (already sorted best first)."""
     shortlist = df[df["passes_threshold"]].head(top)
     by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
@@ -683,7 +835,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str]) 
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
-    lines += run_metrics_lines(counts=df["verdict"].value_counts().to_dict(), shortlisted=len(shortlist))
+    lines += run_metrics_lines(site, funnel, top, verdicts)
     return lines
 
 
@@ -711,16 +863,22 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
 
     print(f"\n[done] {df['verdict'].value_counts().to_dict()}")
     site_col = df["site"].astype(str).str.lower()
+    funnels: dict[str, dict] = {}
     for site in sites:
         site_df = df[site_col == site]
+        funnels[site] = site_funnel(site, site_df, top, verdicts)
         csv_path = OUT_DIR / f"jobs_scored_{site}.csv"
         md_path = OUT_DIR / f"shortlist_{site}.md"
         # Written even when the site returned nothing, so the file never shows
         # a previous run's postings as if they were current.
         site_df[cols].to_csv(csv_path, index=False, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\")
-        md_path.write_text("\n".join(shortlist_lines(site_df, site, top, verdicts)), encoding="utf-8")
-        n_short = min(int(site_df["passes_threshold"].sum()), top)
-        print(f"       {site}: {len(site_df)} postings, {n_short} shortlisted → {md_path}, {csv_path}")
+        md_path.write_text("\n".join(shortlist_lines(site_df, site, top, verdicts, funnels[site])),
+                           encoding="utf-8")
+        print(f"       {site}: {len(site_df)} postings, {funnels[site]['shortlisted']} shortlisted "
+              f"→ {md_path}, {csv_path}")
+    summary_path = OUT_DIR / "run_summary.md"
+    summary_path.write_text("\n".join(run_summary_lines(funnels, top, verdicts)), encoding="utf-8")
+    print(f"       run summary → {summary_path}")
     if history_path:
         print(f"       {history_path} (appended, {len(df)} rows this run)")
 

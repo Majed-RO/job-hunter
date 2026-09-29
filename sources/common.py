@@ -13,7 +13,8 @@ import requests
 import config
 
 # Per-run counts and step durations, filled in as the run goes; printed at
-# the end and written as a "Run metrics" section at the bottom of each shortlist.
+# the end, written per site as a "Run metrics" section at the bottom of each
+# shortlist, and for all sites together in output/run_summary.md.
 RUN_STATS: dict = {}
 
 # Columns every source returns (missing ones are added as None by job_match).

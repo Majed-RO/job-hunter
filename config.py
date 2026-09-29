@@ -31,9 +31,9 @@ SEARCH_TERMS = [
 LOCATIONS = [
     "United States",
     "Worldwide",
-    "MENA",
     "United Arab Emirates",
     "Qatar",
+    "Saudi Arabia"
 ]
 
 # Locations to search, per site. A site not listed here uses LOCATIONS above.

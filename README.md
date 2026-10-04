@@ -369,8 +369,10 @@ For each link it reads `output/history.csv` and says one of:
 **SHORTLISTED**; **SCORED, NOT SHORTLISTED** (with score, verdict and the
 LLM's reason); **DROPPED BEFORE SCORING** (with the pre-filter's reason); or
 **NEVER FOUND** (no search returned it: add a matching search term or
-location, or raise the cap). LinkedIn links match by job id, so any link form
-works, including `?currentJobId=` from search or recommendation pages. No
+location, or raise the cap). LinkedIn and Indeed links match by job id, so any link form works:
+LinkedIn `?currentJobId=` from search or recommendation pages, Indeed
+`?vjk=` from search results, any Indeed country site. jobs.ps and We Work
+Remotely match by URL. No
 network calls; history must be on (`ENABLE_HISTORY_LOG`).
 
 **`output/history.csv`** — append-only log across every run, with a

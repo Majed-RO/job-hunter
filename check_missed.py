@@ -9,8 +9,10 @@ Usage (from ~/job-hunter, with the venv active):
     python check_missed.py < links.txt          # one link per line
 
 Reads output/history.csv only (every run's rows); no network calls.
-LinkedIn links match by job id, so any form works (/jobs/view/<id>,
-?currentJobId=<id> from search or recommendations); other sites match by URL.
+LinkedIn and Indeed links match by job id, so any form works: LinkedIn
+/jobs/view/<id> or ?currentJobId=<id> (search, recommendations); Indeed
+viewjob?jk=<id> or ?vjk=<id> (search page), on any country site
+(ae.indeed.com, ...). Other sites (jobs.ps, We Work Remotely) match by URL.
 """
 
 from __future__ import annotations
@@ -28,15 +30,19 @@ HISTORY_PATH = Path(config.OUTPUT_DIR) / config.HISTORY_FILENAME
 # Same id pattern sources/linkedin.py uses, plus the currentJobId= form that
 # LinkedIn's search and recommendation pages put in the address bar.
 _LI_ID_RES = (re.compile(r"/jobs/view/(?:[^/?]*-)?(\d{6,})"), re.compile(r"currentJobId=(\d{6,})"))
+# Indeed's job id is the jk (job page) or vjk (job open in search results) parameter.
+_INDEED_ID_RE = re.compile(r"[?&]v?jk=([0-9a-f]{8,})", re.I)
 
 
 def job_key(url: str) -> str:
-    """Comparable form of a job link: "li:<id>" for LinkedIn, else the bare URL."""
+    """Comparable form of a job link: "li:<id>" / "indeed:<id>", else the bare URL."""
     url = str(url).strip()
     if "linkedin.com" in url:
         for pattern in _LI_ID_RES:
             if m := pattern.search(url):
                 return f"li:{m.group(1)}"
+    if "indeed." in url and (m := _INDEED_ID_RE.search(url)):
+        return f"indeed:{m.group(1).lower()}"
     parts = urlsplit(url)
     host = parts.netloc.lower().removeprefix("www.")
     return f"{host}{unquote(parts.path).rstrip('/')}".lower()

@@ -10,6 +10,7 @@ from jobspy import scrape_jobs
 from jobspy.model import Country
 
 import config
+from sources.common import RUN_STATS
 
 # JobSpy lists these as "countries", but they aren't real Indeed markets:
 # Indeed has no worldwide or combined US/Canada search.
@@ -41,6 +42,10 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
     combos = [(loc, term) for loc in args.site_locations.get(site, []) for term in args.terms]
     overrides = getattr(config, "LOCATION_RESULTS_OVERRIDE", {})
     n_searches = 0
+    # Searches that came back full (more postings probably exist past the cap)
+    # or failed outright, for the Coverage line in the reports.
+    coverage = RUN_STATS.setdefault("coverage", {}).setdefault(
+        site, {"searches": 0, "capped": [], "failed": []})
     for i, (loc, term) in enumerate(combos, 1):
         country = jobspy_country(loc)
         results_wanted = overrides.get(loc, args.results)
@@ -68,11 +73,21 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
             )
         except Exception as exc:  # a 429 on one search shouldn't kill the run
             print(f"  ! failed: {exc}", file=sys.stderr)
+            coverage["searches"] += 1
+            coverage["failed"].append(f"{term} · {loc}")
             continue
+        coverage["searches"] += 1
+        if df is not None and len(df) >= results_wanted:
+            coverage["capped"].append(f"{term} · {loc} ({results_wanted})")
         if df is not None and len(df):
             df["search_term"] = term
             df["search_location"] = loc
             frames.append(df.dropna(axis=1, how="all"))
         time.sleep(args.delay)  # be polite; reduces 429s
     jobs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    for kind, what in (("capped", "hit the results cap — more postings probably exist"),
+                       ("failed", "failed — their postings are missing from this run")):
+        if coverage[kind]:
+            print(f"[warn] {site}: {len(coverage[kind])} of {coverage['searches']} searches {what}: "
+                  + "; ".join(coverage[kind]), file=sys.stderr)
     return jobs, n_searches

@@ -26,6 +26,15 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
    (`SITE_LOCATIONS`). The results are merged.
 2. **Deduplicates.** Drops repeats by job URL, and again by
    `title + company` (the same posting often appears on both boards).
+   Reference codes at the end of a title (`| REF#289637`, `(Req 123)`,
+   `Job ID: …`, `#4521`) are ignored for this, since some employers post one
+   role per country with a different code each time. A third pass merges
+   postings from the same company with an identical description (ignoring
+   case and spacing) even when the titles were reworded; descriptions under
+   500 characters (e.g. jobs.ps feed summaries) aren't compared, since short
+   text can match by coincidence. The kept posting lists
+   the other copies' links in an `also_posted` column (and "Also posted as" on
+   the shortlist).
 3. **Reads each LinkedIn job page.** The script downloads each LinkedIn
    posting's public (logged-out) page itself instead of letting JobSpy do it
    — still one request per posting — and keeps the description plus
@@ -39,7 +48,7 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
    - match `TITLE_BLOCKERS` (junior/intern titles)
    - have no description (e.g. the LinkedIn/jobs.ps page couldn't be fetched)
    - aren't confirmed remote (the `is_remote` backstop, see §4)
-   - have more than `MAX_APPLICANTS` applicants (LinkedIn only)
+   - are saturated: Easy Apply with "Over 200" applicants (LinkedIn only, `DROP_SATURATED_EASY_APPLY`; other crowded postings are scored and need a higher score instead, see `CROWDED_APPLICANTS`)
    - match a pattern in `HARD_BLOCKERS` — onsite/hybrid, W2-only, geo-locked
      remote, clearance, citizens-only, relocation required
    - are older than `MAX_AGE_DAYS`
@@ -164,7 +173,8 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | Variable | Meaning |
 |---|---|
 | `MAX_AGE_DAYS` | Deterministic, runs before scoring. A backstop on top of `HOURS_OLD` for rows with a stale `date_posted` that slip through. |
-| `MAX_APPLICANTS` | Skip LinkedIn postings with **more** than this many applicants (currently 100). Read from LinkedIn's public job page: "91 applicants" → 91, "Over 200 applicants" → 200, "Be among the first 25 applicants" → 0. Indeed publishes no count, so Indeed rows are never filtered by it. Public-page counts can run higher than what you see logged in (one job showed "Over 200" publicly vs "Over 100" logged in). |
+| `CROWDED_APPLICANTS` / `CROWDED_MIN_OVERALL_SCORE` | A LinkedIn posting with **more** than `CROWDED_APPLICANTS` applicants (100) is "crowded": it is still scored, but needs `overall >= CROWDED_MIN_OVERALL_SCORE` (80) instead of `MIN_OVERALL_SCORE` to be shortlisted, and is marked **Crowded** there. Counts come from LinkedIn's public job page: "91 applicants" → 91, "Over 200 applicants" → 200, "Be among the first 25 applicants" → 0. They count clicks on Apply, not finished applications, and the public page can show a higher bucket than the logged-in view ("Over 200" vs "Over 100"), so crowded postings aren't dropped outright. Indeed publishes no count. |
+| `DROP_SATURATED_EASY_APPLY` / `SATURATED_APPLICANTS` | `True` drops **Easy Apply** postings with at least `SATURATED_APPLICANTS` (200, i.e. "Over 200") applicants before scoring. On Easy Apply the count is mostly real one-click applications, so these are genuinely flooded; on "Apply on company site" the count is clicks, so those are scored as crowded instead. The public page tops out at "Over 200", so values above 200 never match. Dropped postings are listed under "Dropped before scoring" in the shortlist. |
 | `LINKEDIN_DETAIL_DELAY_SECONDS` | Pause between LinkedIn job-page requests (plus a little random jitter). Adds roughly this many seconds per LinkedIn posting to a run. |
 | `LINKEDIN_DETAIL_MAX_FAILURES` | Stop fetching LinkedIn pages after this many failures in a row (LinkedIn is throttling). Unfetched postings are skipped as `no description` rather than scored blind. |
 | *(not a config variable)* `likely_onsite` | A **flag, not a filter.** Set for LinkedIn postings whose location is city-level ("Cairo, Egypt", "San Francisco, CA") *and* whose text has no explicit fully-remote statement ("fully remote", "remote-first", "work from anywhere", …). "Remote/Hybrid" or "remote or on-site" doesn't count. Stand-in for the On-site/Hybrid badge, which is only visible when logged in. Flagged postings get a warning in the LLM prompt and a **Check workplace badge** line in `shortlist_linkedin.md`. |
@@ -278,7 +288,7 @@ python job_match.py
 python job_match.py --provider gemini
 ```
 
-Note: `MAX_AGE_DAYS`, `MAX_APPLICANTS`, `MIN_OVERALL_SCORE`,
+Note: `MAX_AGE_DAYS`, `CROWDED_APPLICANTS`, `MIN_OVERALL_SCORE`,
 `MIN_SKILL_MATCH_PERCENT`, `MODEL_NAME`, `MODEL_TEMPERATURE`, `MAX_RETRIES`,
 `RETRY_DELAY_SECONDS`, `OUTPUT_DIR`, and `CACHE_PATH`
 have **no CLI flag** — edit `config.py` directly to change these. They're
@@ -315,8 +325,14 @@ matched skills, gaps, and any blockers for each. Each entry's first line
 reads like `linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract
 · Easy Apply`, and `likely_onsite` postings get a **Check workplace badge**
 line — open those and look at the On-site/Remote/Hybrid badge before applying.
+After the shortlist comes **Dropped before scoring**: every posting the free
+pre-filter removed, grouped by reason, with title, company and link, so a
+wrong drop is quick to spot. "not confirmed remote" and "older than N days"
+are nearly always right and very noisy, so they show only a count (the rows
+are in the CSV).
 The file ends with a **Run metrics** section for that site only: a short
-paragraph describing the run, then a table of each step (scrape, dedupe,
+paragraph describing the run, a **Coverage** line for LinkedIn/Indeed (see
+below), then a table of each step (scrape, dedupe,
 pre-filter, LLM scoring, verdict filter, score thresholds, shortlist) with how many of
 the site's postings went in and came out, plus its time and details — searches
 run, pages fetched/failed, how many were served from cache vs sent to the LLM,
@@ -324,11 +340,38 @@ and the apply/maybe/skip split. Scoring runs once for all sites together, so
 its time is the whole run's, as is the total time in the last row. The terminal prints each step's time as a
 `[time]` line as it finishes.
 
+**Coverage** (LinkedIn/Indeed): each search fetches at most
+`RESULTS_PER_BOARD` postings (or its `LOCATION_RESULTS_OVERRIDE`). A search
+that comes back full was probably cut off, so more postings exist that this
+run never saw. These searches, and any that failed outright, are listed in a
+`[warn]` line in the terminal, in each shortlist's run metrics and in
+`run_summary.md`. If the same searches keep hitting the cap, raise the cap for
+them.
+
 **`output/run_summary.md`** — rewritten every run: a short paragraph on the
 whole run, then one row per site searched
 (scraped, unique, pre-filtered, scored, from cache, LLM calls, apply, maybe,
 skip, failed, apply/maybe, passed thresholds, shortlisted) with an all-boards total, then
-the time of every step in the run.
+the time of every step in the run. A **Coverage** section above the table
+lists capped or failed searches per site, when there are any.
+
+### Checking for missed jobs — `check_missed.py`
+
+The real test of whether the script loses jobs: browse the boards yourself as
+usual, collect links to postings you'd apply to, and check them:
+
+```bash
+python check_missed.py https://www.linkedin.com/jobs/view/4312345678 https://www.jobs.ps/jobs/...
+python check_missed.py < links.txt    # one link per line
+```
+
+For each link it reads `output/history.csv` and says one of:
+**SHORTLISTED**; **SCORED, NOT SHORTLISTED** (with score, verdict and the
+LLM's reason); **DROPPED BEFORE SCORING** (with the pre-filter's reason); or
+**NEVER FOUND** (no search returned it: add a matching search term or
+location, or raise the cap). LinkedIn links match by job id, so any link form
+works, including `?currentJobId=` from search or recommendation pages. No
+network calls; history must be on (`ENABLE_HISTORY_LOG`).
 
 **`output/history.csv`** — append-only log across every run, with a
 `run_timestamp` column added as the first column, shared by all sites
@@ -525,6 +568,7 @@ fallback being used by accident (a `[warn]` line prints on the fallback).
 │   ├── shortlist_<site>.md
 │   └── history.csv           ← append-only, all sites, every run, never overwritten
 ├── job_match.py             ← CLI, pre-filter, scoring, output
+├── check_missed.py          ← "did the script see this job?" for links you found yourself
 ├── sources/                 ← one module per job site
 │   ├── __init__.py          ← REGISTRY of site name -> module
 │   ├── common.py            ← shared helpers (retrying fetch, title blockers, ...)

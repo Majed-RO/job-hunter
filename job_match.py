@@ -225,16 +225,60 @@ def fetch_jobs(args) -> pd.DataFrame:
             jobs[col] = None
 
     jobs["dedupe_key"] = (
-        jobs["title"].fillna("").str.lower().str.strip()
+        jobs["title"].fillna("").map(dedupe_title)
         + "|"
         + jobs["company"].fillna("").str.lower().str.strip()
     )
+    # Same company + identical full description = the same role even when the
+    # title was reworded. Short text (jobs.ps feed snippets, stubs) can match
+    # by coincidence, so it's left out of this check.
+    desc = jobs["description"].map(lambda d: " ".join(d.lower().split()) if isinstance(d, str) else "")
+    jobs["dedupe_desc_key"] = (jobs["company"].fillna("").str.lower().str.strip() + "|" + desc).where(
+        desc.str.len() >= MIN_DEDUPE_DESC_CHARS)
     before = len(jobs)
-    jobs = jobs.drop_duplicates(subset=["job_url"]).drop_duplicates(subset=["dedupe_key"])
+    jobs = jobs.drop_duplicates(subset=["job_url"])
+    jobs["also_posted"] = None
+    # The same role posted several times (e.g. once per country) is scored
+    # once; the copies' links are kept on it so none is lost.
+    jobs = merge_duplicates(jobs, "dedupe_key")
+    jobs = merge_duplicates(jobs, "dedupe_desc_key")
     print(f"[scrape] {before} rows → {len(jobs)} unique postings")
     RUN_STATS.update(rows_scraped=before, unique_postings=len(jobs),
                      unique_by_source=jobs["site"].astype(str).str.lower().value_counts().to_dict())
     return jobs.reset_index(drop=True)
+
+
+MIN_DEDUPE_DESC_CHARS = 500  # shorter descriptions aren't compared for duplicates
+
+
+def merge_duplicates(jobs: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Keep the first row per non-empty `key`; the dropped rows' links (and
+    their own also_posted links) are appended to the kept row's also_posted."""
+    keyed = jobs[key].notna()
+    dup = keyed & jobs.duplicated(subset=[key])
+    if not dup.any():
+        return jobs
+    jobs = jobs.copy()
+    first = jobs[keyed & ~dup].reset_index().set_index(key)["index"]
+    for idx in jobs.index[dup]:
+        links = [jobs.at[idx, "job_url"], jobs.at[idx, "also_posted"]]
+        keep = first[jobs.at[idx, key]]
+        jobs.at[keep, "also_posted"] = "; ".join(
+            str(x) for x in [jobs.at[keep, "also_posted"], *links] if isinstance(x, str) and x)
+    return jobs[~dup]
+
+
+# Reference codes employers append to otherwise identical titles, e.g.
+# "... Remote Work | REF#289637" vs "| REF#289638" for the same role posted
+# per country. Stripped (at the end of the title only) before comparing.
+_TITLE_REF_RE = re.compile(
+    r"[\s|\-–—(\[]*(?:\b(?:ref|req|requisition|job\s*id|id)\b\s*[#:.]?\s*|#)"
+    r"[a-z]*[-_]?\d[\w-]*[\s)\]]*$", re.I)
+
+
+def dedupe_title(title: str) -> str:
+    """Title in the form used to spot the same role posted twice."""
+    return " ".join(_TITLE_REF_RE.sub("", str(title)).lower().split())
 
 
 def prefilter(row) -> str | None:
@@ -268,9 +312,12 @@ def prefilter(row) -> str | None:
         return "not confirmed remote (no remote/WFH signal found)"
 
     # Applicant count from the LinkedIn page (Indeed rows have none -> never fire).
-    applicants = row.get("applicants")
-    if applicants is not None and not pd.isna(applicants) and applicants > config.MAX_APPLICANTS:
-        return f"> {config.MAX_APPLICANTS} applicants ({row.get('applicants_text') or applicants})"
+    # Easy Apply + "Over 200" applicants: flooded (see config). Other crowded
+    # postings are scored and need a higher score instead (is_crowded).
+    applicants = pd.to_numeric(row.get("applicants"), errors="coerce")
+    if (getattr(config, "DROP_SATURATED_EASY_APPLY", False) and _flag(row.get("easy_apply"))
+            and pd.notna(applicants) and applicants >= config.SATURATED_APPLICANTS):
+        return f"saturated Easy Apply ({row.get('applicants_text') or int(applicants)})"
 
     for label, pattern, exception in _COMPILED_BLOCKERS:
         if label in _WORKPLACE_LABELS and not site_remote_only:
@@ -318,9 +365,20 @@ def min_scores(site) -> tuple[int, int]:
             getattr(config, "SITE_MIN_SKILL_MATCH_PERCENT", {}).get(site, config.MIN_SKILL_MATCH_PERCENT))
 
 
+def is_crowded(row) -> bool:
+    """More LinkedIn applicants than config.CROWDED_APPLICANTS."""
+    limit = getattr(config, "CROWDED_APPLICANTS", None)
+    applicants = pd.to_numeric(row.get("applicants"), errors="coerce")
+    return limit is not None and pd.notna(applicants) and applicants > limit
+
+
 def thresholds_text(site) -> str:
     overall, stack = min_scores(site)
-    return f"overall >= {overall}, stack_fit >= {stack}"
+    text = f"overall >= {overall}, stack_fit >= {stack}"
+    if str(site).lower() == "linkedin" and getattr(config, "CROWDED_APPLICANTS", None) is not None:
+        text += (f"; overall >= {config.CROWDED_MIN_OVERALL_SCORE} when over "
+                 f"{config.CROWDED_APPLICANTS} applicants")
+    return text
 
 
 def cache_key(resume: str, constraints: str, row) -> str:
@@ -746,17 +804,65 @@ def site_paragraph(site: str, f: dict, top: int, verdicts: list[str]) -> str:
     return text
 
 
+def coverage_text(site: str) -> str | None:
+    """One line on searches that were cut off or failed for this site, or None
+    if every search came back complete (sources without searches: None)."""
+    c = RUN_STATS.get("coverage", {}).get(site)
+    if not c or not c["searches"]:
+        return None
+    parts = []
+    if c["capped"]:
+        parts.append(f"{len(c['capped'])} of {c['searches']} searches hit the results cap, so more "
+                     f"postings probably exist ({'; '.join(c['capped'])}). Raise RESULTS_PER_BOARD "
+                     "or LOCATION_RESULTS_OVERRIDE for those to see them")
+    if c["failed"]:
+        parts.append(f"{len(c['failed'])} of {c['searches']} searches failed, so their postings are "
+                     f"missing from this run ({'; '.join(c['failed'])})")
+    return ". ".join(parts) + "." if parts else f"all {c['searches']} searches came back complete."
+
+
+# Pre-filter labels that are nearly always right and very noisy: the dropped
+# section shows only a count for these instead of every posting.
+_COLLAPSED_DROP_LABELS = ("not confirmed remote", "older than")
+
+
+def dropped_lines(df: pd.DataFrame) -> list[str]:
+    """Markdown list of one site's postings the pre-filter dropped, grouped by
+    label, so a wrong drop can be spotted without opening the CSV."""
+    dropped = df[df["reason"] == "filtered out before scoring"]
+    if not len(dropped):
+        return []
+    groups = dropped["blockers"].astype(str).str.replace(r"\s*\(.*\)$", "", regex=True)
+    lines = ["---", "", f"## Dropped before scoring ({len(dropped)})", "",
+             "Removed by the free pre-filter, never sent to the LLM. Skim for anything "
+             "that shouldn't have been dropped.", ""]
+    for label, rows in dropped.groupby(groups, sort=False):
+        if label.startswith(_COLLAPSED_DROP_LABELS):
+            lines.append(f"- **{label}**: {len(rows)} (listed in the CSV)")
+            continue
+        lines.append(f"- **{label}** ({len(rows)})")
+        for _, r in rows.iterrows():
+            detail = r["blockers"][len(label):].strip()
+            lines.append(f"  - [{r['title']}]({r['job_url']}) — "
+                         f"{_str_or(r.get('company'), 'company not listed')}"
+                         + (f" {detail}" if detail else ""))
+    return lines + [""]
+
+
 def run_metrics_lines(site: str, f: dict, top: int, verdicts: list[str]) -> list[str]:
     """Markdown 'Run metrics' section for the bottom of one site's shortlist:
     that site's postings in and out of each step, from scrape to shortlist."""
     dry_run_note = (f"dry run: {f['flagged']} flagged but still scored"
                     if config.PREFILTER_DRY_RUN else "title/blocker/age/applicant rules, no LLM")
+    coverage = coverage_text(site)
     lines = ["---", "", f"## Run metrics — {site}", "", _run_header(), "",
              site_paragraph(site, f, top, verdicts), "",
+             *([f"**Coverage:** {coverage}", ""] if coverage else []),
              "| Step | Time | In | Out | Details |", "|---|---|---:|---:|---|",
              f"| scrape | {_fmt_time(f'scrape {site}')} | — | {f['scraped']} | {_scrape_details(site)} |",
              f"| dedupe | — | {f['scraped']} | {f['unique']} | "
-             f"{f['scraped'] - f['unique']} duplicate(s) dropped (same URL, or same title + company) |",
+             f"{f['scraped'] - f['unique']} duplicate(s) dropped (same URL; same title + company, "
+             f"ignoring reference codes like REF#123; or same company + identical description) |",
              f"| pre-filter | — | {f['unique']} | {f['to_score']} | "
              f"{f['prefiltered']} filtered out; {dry_run_note} |",
              f"| LLM scoring | {_fmt_time('scoring')} (all boards) | {f['to_score']} | {f['to_score']} | "
@@ -811,6 +917,9 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
              f"Boards: {', '.join(funnels) or '(none)'} · thresholds: "
              + "; ".join(f"{site} {thresholds_text(site)}" for site in funnels)
              + f" · top {top} per board", "",
+             *(["## Coverage", "",
+                *[f"- **{site}**: {text}" for site in funnels if (text := coverage_text(site))],
+                ""] if any(coverage_text(site) for site in funnels) else []),
              "## Postings through each step", "",
              "| Board | " + " | ".join(label for _, label in cols) + " |",
              "|---|" + "---:|" * len(cols)]
@@ -847,6 +956,11 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
     for _, r in shortlist.iterrows():
         lines.append(f"## {r['overall']} · {r['title']} — {_str_or(r.get('company'), 'company not listed')}")
         lines.append(f"*{shortlist_meta(r)}* · [posting]({r['job_url']})")
+        if is_crowded(r):
+            lines.append(f"**Crowded ({_str_or(r.get('applicants_text'), str(r.get('applicants')))})** "
+                         "— shortlisted for a strong match; apply soon and tailor the application.")
+        if isinstance(r.get("also_posted"), str) and r["also_posted"]:
+            lines.append(f"Also posted as: {r['also_posted']}")
         if _flag(r.get("feed_only")):
             lines.append("**Feed summary only** — jobs.ps blocked the page fetch, so this was "
                          "scored from a short summary. Open the posting to read it in full.")
@@ -861,6 +975,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
+    lines += dropped_lines(df)
     lines += run_metrics_lines(site, funnel, top, verdicts)
     return lines
 
@@ -874,6 +989,11 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
     df = df.copy()
     verdicts = [v.lower() for v in getattr(config, "SHORTLIST_VERDICTS", ["apply", "maybe"])]
     min_overall = df["site"].map(lambda site: min_scores(site)[0])
+    # Crowded postings need a stronger match (CROWDED_MIN_OVERALL_SCORE).
+    crowded = df.apply(is_crowded, axis=1) if len(df) else pd.Series(dtype=bool)
+    if crowded.any():
+        min_overall = min_overall.where(
+            ~crowded, min_overall.clip(lower=config.CROWDED_MIN_OVERALL_SCORE))
     min_stack = df["site"].map(lambda site: min_scores(site)[1])
     df["passes_threshold"] = (
         (df["overall"] >= min_overall)
@@ -884,7 +1004,7 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
     cols = ["overall", "passes_threshold", "verdict", "title", "company", "site",
             "location", "search_location", "employment_type", "seniority_level", "date_posted",
             "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
-            "likely_onsite", "feed_only", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "likely_onsite", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
             "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
     cols = [c for c in cols if c in df.columns]
     history_path = append_history(df, cols) if len(df) else None

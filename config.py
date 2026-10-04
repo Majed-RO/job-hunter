@@ -182,13 +182,22 @@ RESULTS_PER_BOARD = 15  # results requested per board, per search term
 # that never actually fired since HOURS_OLD already filtered tighter upstream.
 MAX_AGE_DAYS = 5         # belt-and-suspenders on top of HOURS_OLD; catches rows
                          # with a stale date_posted that slip through
-MAX_APPLICANTS = 100     # skip LinkedIn postings with MORE than this many
-                         # applicants. Read from LinkedIn's public job page
-                         # ("91 applicants", "Over 200 applicants" -> 200).
-                         # Indeed publishes no applicant count, so Indeed rows
-                         # are never filtered by this. Guest-page counts can run
-                         # higher than the logged-in view ("Over 200" vs "Over
-                         # 100" for the same job), so this is a rough cut.
+# LinkedIn applicant counts, read from the public job page ("91 applicants",
+# "Over 200 applicants" -> 200). Indeed publishes none, so these never apply
+# there. The count is clicks on Apply, not finished applications, and the
+# guest page can show a higher bucket than the logged-in view ("Over 200" vs
+# "Over 100"), so a crowded posting is scored, not dropped: it just needs a
+# stronger match to be shortlisted, and is marked "Crowded" there.
+CROWDED_APPLICANTS = 100         # more applicants than this = crowded
+CROWDED_MIN_OVERALL_SCORE = 80   # min "overall" for a crowded posting to be
+                                 # shortlisted (instead of MIN_OVERALL_SCORE)
+# Saturated = Easy Apply with "Over 200" applicants: on Easy Apply the count
+# is mostly real one-click applications (on "Apply on company site" it's
+# clicks), so these are genuinely flooded. Dropped before scoring (listed under
+# "Dropped before scoring" in the shortlist). The public page tops out at
+# "Over 200", parsed as 200, so SATURATED_APPLICANTS above 200 never matches.
+DROP_SATURATED_EASY_APPLY = True
+SATURATED_APPLICANTS = 200
  
 # Blocked postings are never sent to the LLM — they cost nothing, but they also
 # get no nuanced judgment, so patterns here must be high-precision.

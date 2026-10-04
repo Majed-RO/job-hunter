@@ -8,6 +8,13 @@ description truncated — so each posting's page is fetched once for the
 fields the feed doesn't carry: full description, location, workplace type
 (office/remote/field), category and deadline.
 
+Feed fallback: since 2026-10 jobs.ps serves its job pages behind a Cloudflare
+browser challenge (403 "Just a moment..." to scripts) while the RSS feeds stay
+open. A posting whose page can't be fetched is still kept, scored from the
+feed's title + ~300-char description snippet (feed_only=True, flagged in the
+prompt and on the shortlist). Its category is unknown, so the
+JOBSPS_CATEGORIES filter can't drop it.
+
 Which feeds are read:
 - Locations set for jobsps (config.SITE_LOCATIONS["jobsps"] or --locations):
   read those location feeds, then keep only postings whose page category is
@@ -109,7 +116,7 @@ def _slug_key(slug: str) -> str:
 
 
 def fetch_rss(slug: str) -> list[dict]:
-    """One location or category RSS feed -> list of {title, job_url, date_posted}."""
+    """One location or category RSS feed -> list of {title, job_url, date_posted, snippet}."""
     url = JOBSPS_RSS_URL.format(slug)
     try:
         resp = requests.get(url, headers=JOBSPS_HEADERS, timeout=15)
@@ -127,6 +134,7 @@ def fetch_rss(slug: str) -> list[dict]:
             "title": (item.findtext("title") or "").strip(),
             "job_url": link,
             "date_posted": (item.findtext("pubDate") or "").strip() or None,
+            "snippet": " ".join((item.findtext("description") or "").split()),
         })
     return items
 
@@ -170,6 +178,34 @@ def parse_page(html: str) -> dict:
         idx = full_text.find("الوصف الوظيفي")
         info["description"] = full_text[idx:] if idx != -1 else full_text
     return info
+
+
+# Prepended to a feed-only posting's description so the LLM knows what it's
+# looking at (the prompt has no other field for it).
+FEED_ONLY_NOTE = ("[Feed summary only: the full posting page could not be fetched, so this "
+                  "description is cut off and company/deadline are unknown. Judge on what is "
+                  "here; do not mark the posting down for details that are missing.]")
+
+
+def feed_only_row(item: dict, locations: list[str]) -> dict:
+    """A posting built from its RSS item alone, for when its page can't be fetched."""
+    return {
+        "title": item["title"],
+        "company": None,
+        "location": "Palestine",
+        "description": f"{FEED_ONLY_NOTE}\n\n{item['snippet']}" if item.get("snippet") else None,
+        "job_url": item["job_url"],
+        "job_type": None,
+        "date_posted": item.get("date_posted"),
+        "min_amount": None,
+        "max_amount": None,
+        "interval": None,
+        "site": SITE,
+        "is_remote": None,
+        "search_term": None if locations else item["feed"],
+        "search_location": item["feed"] if locations else "Palestine",
+        "feed_only": True,
+    }
 
 
 def fetch(args) -> pd.DataFrame:
@@ -216,9 +252,14 @@ def fetch(args) -> pd.DataFrame:
     delay = getattr(config, "JOBSPS_DETAIL_DELAY_SECONDS", 1.0)
     max_failures = getattr(config, "JOBSPS_DETAIL_MAX_FAILURES", 5)
     print(f"[jobsps] fetching {len(deduped)} job page(s) …", flush=True)
-    ok = failed = in_a_row = off_category = 0
+    ok = failed = in_a_row = off_category = feed_only = 0
     rows = []
     for n, item in enumerate(deduped, 1):
+        if in_a_row >= max_failures:
+            # Pages are blocked: keep the rest from the feed without trying them.
+            rows.append(feed_only_row(item, locations))
+            feed_only += 1
+            continue
         if n > 1:
             time.sleep(delay + random.uniform(0, delay / 2))
         if n % 10 == 0 or n == len(deduped):
@@ -227,10 +268,11 @@ def fetch(args) -> pd.DataFrame:
         if html is None:
             failed += 1
             in_a_row += 1
+            rows.append(feed_only_row(item, locations))
+            feed_only += 1
             if in_a_row >= max_failures:
-                print(f"  ! {in_a_row} failures in a row — skipping the remaining "
-                      f"{len(deduped) - n} page(s)", file=sys.stderr)
-                break
+                print(f"  ! {in_a_row} failures in a row — not trying the remaining "
+                      f"{len(deduped) - n} page(s); using feed summaries instead", file=sys.stderr)
         else:
             in_a_row = 0
             ok += 1
@@ -256,11 +298,14 @@ def fetch(args) -> pd.DataFrame:
                 "is_remote": bool(_JOBSPS_REMOTE_RE.search(work_nature)) if work_nature else None,
                 "search_term": category,
                 "search_location": item["feed"] if locations else "Palestine",
+                "feed_only": False,
             })
     kept = (f", {off_category} dropped (category not in JOBSPS_CATEGORIES)"
             if off_category else "")
-    print(f"[jobsps] {ok} ok, {failed} failed{kept}")
-    RUN_STATS.update(jobsps_pages_ok=ok, jobsps_pages_failed=failed)
+    fallback = (f"; {feed_only} kept from the feed summary only (page blocked/failed, "
+                "category filter not applied)" if feed_only else "")
+    print(f"[jobsps] {ok} ok, {failed} failed{kept}{fallback}")
+    RUN_STATS.update(jobsps_pages_ok=ok, jobsps_pages_failed=failed, jobsps_feed_only=feed_only)
     note(SITE, f"{len(feeds)} feed(s): {', '.join(feeds)}; {ok} pages fetched, "
-               f"{failed} failed{kept}{overflow_note}")
+               f"{failed} failed{kept}{fallback}{overflow_note}")
     return fill_generic_fields(pd.DataFrame(rows)) if rows else pd.DataFrame()

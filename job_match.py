@@ -331,8 +331,11 @@ def cache_key(resume: str, constraints: str, row) -> str:
     # the key: a posting whose flag flips gets re-scored instead of reusing a
     # score made without the warning. Constraints (with any per-site extra)
     # are in it so editing them re-scores the postings they apply to.
+    # A jobs.ps feed-only posting (page blocked) gets its own key, so once its
+    # page can be fetched it's re-scored from the full description.
     blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{row.get('job_url')}|{row.get('title')}|"
-            f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}")
+            f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}"
+            + ("|feed_only" if _flag(row.get("feed_only")) else ""))
     return hashlib.sha1(blob.encode()).hexdigest()
 
 
@@ -844,6 +847,9 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
     for _, r in shortlist.iterrows():
         lines.append(f"## {r['overall']} · {r['title']} — {_str_or(r.get('company'), 'company not listed')}")
         lines.append(f"*{shortlist_meta(r)}* · [posting]({r['job_url']})")
+        if _flag(r.get("feed_only")):
+            lines.append("**Feed summary only** — jobs.ps blocked the page fetch, so this was "
+                         "scored from a short summary. Open the posting to read it in full.")
         if _flag(r.get("likely_onsite")):
             lines.append("**Check workplace badge** — city-level location and no explicit "
                          "fully-remote statement; may be On-site/Hybrid.")
@@ -878,7 +884,7 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
     cols = ["overall", "passes_threshold", "verdict", "title", "company", "site",
             "location", "search_location", "employment_type", "seniority_level", "date_posted",
             "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
-            "likely_onsite", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "likely_onsite", "feed_only", "reason", "blockers", "prefilter_flag", "matched", "gaps",
             "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
     cols = [c for c in cols if c in df.columns]
     history_path = append_history(df, cols) if len(df) else None

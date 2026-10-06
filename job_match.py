@@ -306,9 +306,15 @@ def prefilter(row) -> str | None:
     # signal — use it as a backstop the same way MAX_AGE_DAYS backstops
     # HOURS_OLD. Only fires when this posting's site is searched remote-only
     # and is_remote is explicitly False (not NaN/None: "couldn't tell").
+    # Not applied to LinkedIn: its public job page has no workplace badge, so
+    # a genuinely remote posting often never says "remote" in its text (Modern
+    # Family Law, 2026-10-06) and was dropped. LinkedIn rows rely on the
+    # remote search filter, the explicit onsite/hybrid blockers below, and the
+    # likely_onsite warning that goes to the scorer and the shortlist.
     is_remote_flag = row.get("is_remote")
     site_remote_only = remote_only(row.get("site"))
-    if site_remote_only and pd.notna(is_remote_flag) and not is_remote_flag:
+    if (site_remote_only and row.get("site") != "linkedin"
+            and pd.notna(is_remote_flag) and not is_remote_flag):
         return "not confirmed remote (no remote/WFH signal found)"
 
     # Applicant count from the LinkedIn page (Indeed rows have none -> never fire).

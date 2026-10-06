@@ -16,6 +16,8 @@ SEARCH_TERMS = [
     "TypeScript full stack engineer",
     "Next.js TypeScript Prisma",
     "React Node.js contractor",
+    "senior React engineer",
+    "frontend React TypeScript",
 ]
 
 # COUNTRY_INDEED = "USA"
@@ -63,7 +65,7 @@ SITE_LOCATIONS = {
 # else, freeing budget for UAE/Qatar (which, unlike MENA, get Indeed
 # coverage too). Locations not listed here use RESULTS_PER_BOARD as-is.
 LOCATION_RESULTS_OVERRIDE = {
-    "United States": 5,
+    "United States": 10,
 }
 
 IS_REMOTE = True

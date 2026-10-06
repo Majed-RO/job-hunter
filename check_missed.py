@@ -71,12 +71,21 @@ def main(urls: list[str]) -> None:
         sys.exit(f"No history yet ({HISTORY_PATH}); run job_match.py first "
                  "(with ENABLE_HISTORY_LOG = True).")
     history = pd.read_csv(HISTORY_PATH, low_memory=False)
-    history["key"] = history["job_url"].map(job_key)
+    # A posting merged into another as a duplicate (same title + company in a
+    # different location, e.g. Fuse Energy London/Dubai) lives in also_posted.
+    history["links"] = history.apply(lambda r: [r["job_url"]] + (
+        str(r["also_posted"]).split("; ") if pd.notna(r["also_posted"]) else []), axis=1)
+    history = history.explode("links")
+    history["key"] = history["links"].map(job_key)
     missed = 0
     for url in urls:
         rows = history[history["key"] == job_key(url)]
         if len(rows):
-            print(f"{url}\n  {describe(rows)}\n")
+            note = ""
+            if (rows["job_url"].map(job_key) != job_key(url)).all():
+                note = (f"\n  (found as a duplicate of {rows['job_url'].iloc[-1]}; "
+                        "the script keeps one posting per title + company)")
+            print(f"{url}\n  {describe(rows.drop_duplicates('run_timestamp'))}{note}\n")
         else:
             missed += 1
             print(f"{url}\n  NEVER FOUND: no run's searches returned it. Add a search term "

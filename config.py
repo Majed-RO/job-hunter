@@ -12,12 +12,23 @@ this file and run `python job_match.py` with no flags at all. Passing a flag
 # ==========================================
 SEARCH_TERMS = [
     "Next.js developer",
-    "senior Next.js engineer",
     "TypeScript full stack engineer",
-    "Next.js TypeScript Prisma",
-    "React Node.js contractor",
     "senior React engineer",
-    "frontend React TypeScript",
+]
+
+# Broad terms that cast a wide net. Their postings are only scored if the
+# title/description mentions one of WIDE_REQUIRED_KEYWORDS (free pre-filter),
+# unless the same posting was also found by a SEARCH_TERMS term. Searched in
+# addition to SEARCH_TERMS, at WIDE_RESULTS_PER_BOARD results each.
+WIDE_SEARCH_TERMS = [
+    "Full Stack Web Developer",
+    "Web Developer",
+]
+WIDE_RESULTS_PER_BOARD = 30
+# Regexes (case-insensitive); a wide-term posting needs at least one match.
+WIDE_REQUIRED_KEYWORDS = [
+    r"\breact(?:\.?js)?\b", r"\bnext\.?js\b", r"\btypescript\b",
+    r"\bnode(?:\.?js)?\b", r"\bjavascript\b",
 ]
 
 # COUNTRY_INDEED = "USA"
@@ -102,40 +113,6 @@ SOURCES = ["linkedin", "indeed", "jobsps", "weworkremotely"]
 # (the URL's last path segment, e.g. ".../categories/it-jobs" -> "it-jobs").
 # With SITE_LOCATIONS["jobsps"] set, this is a filter on each posting's
 # category; empty list = keep every category in those locations.
-
-# Jobs.ps full list of categories (slugs) as of 2026-09-24:
-""" الذكاء الاصطناعي وعلم البيانات : AI-Big-Data-jobs
-التنمية الاقتصادية والتعاون الدولي : development-economic-jobs
-المنح والتمويل : Grants-and-Funding-jobs
-التسويق الرقمي: تحسين محركات البحث، البريد الإلكتروني، المحتوى : Digital-Marketing-jobs
-الإدارة والأعمال : business-administration-jobs
-الثقافة والفنون : culture-arts-jobs
-التعليم والتدريب : education-training-jobs
-الهندسة : engineering-jobs
-المحاسبة، الإقتصاد والعلوم المالية : accounting-finance-jobs
-اللغات والترجمة : languages-and-translation-jobs
-التصميم الجرافيكي والحركي : graphic-design-jobs
-الطب، التمريض، الصيدلة، والصحة العامة : healthcare-jobs
-الفندقة والسياحة : hospitality-tourism-jobs
-تكنولوجيا المعلومات وهندسة البرمجيات : it-jobs
-القانون والمحاماة : legal-jobs
-العمليات والدعم اللوجستي : operations-jobs
-الصحافة والإعلام : press-media-jobs
-العلاقات العامة : public-relation-jobs
-التسويق والمبيعات : sales-marketing-jobs
-العلوم الاجتماعية والدراسات المجتمعية : social-science-jobs
-الموارد البشرية : human-resources-jobs
-خدمة العملاء والدعم الفني : customer-service-and-support-jobs
-الإنشاءات والعقارات : construction-and-real-estate-jobs
-العلوم والبحوث : science-and-research-jobs
-المشتريات والتوريد : procurement-and-purchasing-jobs
-التصنيع والإنتاج : manufacturing-and-production-jobs
-النقل والخدمات اللوجستية : transportation-and-logistics-jobs
-الزراعة والبيئة : agriculture-and-environment-jobs
-الأمن والسلامة : security-and-safety-jobs
-التنظيف والصيانة : cleaning-and-maintenance-jobs
-حقوق الإنسان والمساواة بين الجنسين والحماية : human-rights-gender-protection-jobs
-مجالات متنوعة : others-jobs """
 
 JOBSPS_CATEGORIES = [
   "it-jobs",

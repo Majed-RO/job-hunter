@@ -41,6 +41,7 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
     frames = []
     combos = [(loc, term) for loc in args.site_locations.get(site, []) for term in args.terms]
     overrides = getattr(config, "LOCATION_RESULTS_OVERRIDE", {})
+    wide_terms = set(getattr(config, "WIDE_SEARCH_TERMS", []))
     n_searches = 0
     # Searches that came back full (more postings probably exist past the cap)
     # or failed outright, for the Coverage line in the reports.
@@ -48,8 +49,12 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
         site, {"searches": 0, "capped": [], "failed": []})
     for i, (loc, term) in enumerate(combos, 1):
         country = jobspy_country(loc)
-        results_wanted = overrides.get(loc, args.results)
-        note = f" (results capped at {results_wanted} for {loc})" if loc in overrides else ""
+        if term in wide_terms:
+            results_wanted = config.WIDE_RESULTS_PER_BOARD
+            note = f" (wide term, results capped at {results_wanted})"
+        else:
+            results_wanted = overrides.get(loc, args.results)
+            note = f" (results capped at {results_wanted} for {loc})" if loc in overrides else ""
         if countries_only and not country:
             print(f"[{site}] ({i}/{len(combos)}) {term!r} in {loc!r} skipped: not a supported country")
             continue

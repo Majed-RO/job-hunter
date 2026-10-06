@@ -236,6 +236,11 @@ def fetch_jobs(args) -> pd.DataFrame:
     jobs["dedupe_desc_key"] = (jobs["company"].fillna("").str.lower().str.strip() + "|" + desc).where(
         desc.str.len() >= MIN_DEDUPE_DESC_CHARS)
     before = len(jobs)
+    # A posting is "wide only" when every search that found it used a wide
+    # term; those get the keyword pre-filter (see prefilter()).
+    wide_terms = set(getattr(config, "WIDE_SEARCH_TERMS", []))
+    found_by_wide = jobs["search_term"].isin(wide_terms) if "search_term" in jobs else pd.Series(False, index=jobs.index)
+    jobs["wide_only"] = found_by_wide.groupby(jobs["job_url"]).transform("all")
     jobs = jobs.drop_duplicates(subset=["job_url"])
     jobs["also_posted"] = None
     # The same role posted several times (e.g. once per country) is scored
@@ -263,6 +268,7 @@ def merge_duplicates(jobs: pd.DataFrame, key: str) -> pd.DataFrame:
     for idx in jobs.index[dup]:
         links = [jobs.at[idx, "job_url"], jobs.at[idx, "also_posted"]]
         keep = first[jobs.at[idx, key]]
+        jobs.at[keep, "wide_only"] = bool(jobs.at[keep, "wide_only"] and jobs.at[idx, "wide_only"])
         jobs.at[keep, "also_posted"] = "; ".join(
             str(x) for x in [jobs.at[keep, "also_posted"], *links] if isinstance(x, str) and x)
     return jobs[~dup]
@@ -281,6 +287,9 @@ def dedupe_title(title: str) -> str:
     return " ".join(_TITLE_REF_RE.sub("", str(title)).lower().split())
 
 
+_WIDE_KEYWORDS = [re.compile(p, re.I) for p in getattr(config, "WIDE_REQUIRED_KEYWORDS", [])]
+
+
 def prefilter(row) -> str | None:
     """Return a short label if this posting should skip LLM scoring, else None."""
     title = row.get("title") or ""
@@ -296,6 +305,13 @@ def prefilter(row) -> str | None:
     # no description would just be a guess.
     if not desc.strip():
         return f"no description ({row.get('site')} page fetch failed)"
+
+    # Wide-term results (e.g. "Web Developer") are mostly other stacks; keep
+    # only those that mention the candidate's stack. Narrow-term hits skip this.
+    wide = row.get("wide_only")
+    if pd.notna(wide) and wide:
+        if not any(p.search(text) for p in _WIDE_KEYWORDS):
+            return "wide search: no stack keyword (React/Next/TS/Node/JS)"
 
     # LinkedIn's own "remote only" search filter (f_WT=2) is a request-side
     # hint, not a guarantee — promoted/sponsored listings have been observed
@@ -1044,7 +1060,8 @@ def main() -> None:
                                      "falls back to config.CANDIDATE_PROFILE if omitted")
     ap.add_argument("--constraints", help="text file describing your hard requirements; "
                                           "falls back to config.CONSTRAINTS if omitted")
-    ap.add_argument("--terms", nargs="+", default=config.SEARCH_TERMS)
+    ap.add_argument("--terms", nargs="+",
+                    default=config.SEARCH_TERMS + getattr(config, "WIDE_SEARCH_TERMS", []))
     ap.add_argument("--locations", nargs="+", default=None,
                     help='locations for every site in this run, e.g. "United States" MENA '
                          '(LinkedIn/Indeed) or gaza-jobs (jobs.ps); pair with --sites. '

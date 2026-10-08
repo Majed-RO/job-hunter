@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 
@@ -10,7 +11,7 @@ from jobspy import scrape_jobs
 from jobspy.model import Country
 
 import config
-from sources.common import RUN_STATS
+from sources.common import RUN_STATS, days_since
 
 # JobSpy lists these as "countries", but they aren't real Indeed markets:
 # Indeed has no worldwide or combined US/Canada search.
@@ -47,6 +48,16 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
     # or failed outright, for the Coverage line in the reports.
     coverage = RUN_STATS.setdefault("coverage", {}).setdefault(
         site, {"searches": 0, "capped": [], "failed": []})
+    # JobSpy's Indeed query takes either a date filter or the remote filter,
+    # never both (hours_old wins), so a remote-only Indeed search with
+    # hours_old came back about half onsite and those rows filled the results
+    # cap. Send the remote filter instead and drop old postings here: Indeed
+    # returns remote-only results newest first, so the cap still takes the
+    # freshest.
+    age_after = site == "indeed" and remote_only and args.hours
+    hours_old = None if age_after else args.hours
+    max_days = math.ceil(args.hours / 24) if age_after else None
+    too_old = 0
     for i, (loc, term) in enumerate(combos, 1):
         country = jobspy_country(loc)
         if term in wide_terms:
@@ -67,7 +78,7 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
                 location=loc,
                 is_remote=remote_only,
                 results_wanted=results_wanted,
-                hours_old=args.hours,
+                hours_old=hours_old,
                 # For regions like "MENA", pass "worldwide": JobSpy otherwise defaults
                 # to USA and tags some LinkedIn locations as "..., USA".
                 country_indeed=country or "worldwide",
@@ -82,6 +93,11 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
             coverage["failed"].append(f"{term} · {loc}")
             continue
         coverage["searches"] += 1
+        if age_after and df is not None and len(df):
+            ages = df["date_posted"].map(days_since)
+            fresh = ages.isna() | (ages <= max_days)
+            too_old += int((~fresh).sum())
+            df = df[fresh]
         if df is not None and len(df) >= results_wanted:
             coverage["capped"].append(f"{term} · {loc} ({results_wanted})")
         if df is not None and len(df):
@@ -90,6 +106,9 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
             frames.append(df.dropna(axis=1, how="all"))
         time.sleep(args.delay)  # be polite; reduces 429s
     jobs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if too_old:
+        print(f"[{site}] dropped {too_old} postings older than {max_days} days "
+              "(remote filter on, so the age check runs after the search)")
     for kind, what in (("capped", "hit the results cap — more postings probably exist"),
                        ("failed", "failed — their postings are missing from this run")):
         if coverage[kind]:

@@ -42,8 +42,10 @@ SITE = "linkedin"
 # LinkedIn search for that term — common with region searches like "MENA".
 # This wrapper keeps the country name as LinkedIn displayed it instead of
 # crashing. Supported countries go through JobSpy's original code unchanged.
-# Applied on import of this module.
-_orig_get_location = LinkedIn._get_location
+# Applied on import of this module, and only to JobSpy versions that have
+# LinkedIn._get_location: 1.3.0 parses locations in linkedin.util.parse_location
+# and handles unknown countries itself.
+_orig_get_location = getattr(LinkedIn, "_get_location", None)
 
 
 def _safe_get_location(self, metadata_card):
@@ -57,7 +59,8 @@ def _safe_get_location(self, metadata_card):
         return Location(city=", ".join(parts) or None)
 
 
-LinkedIn._get_location = _safe_get_location
+if _orig_get_location is not None:
+    LinkedIn._get_location = _safe_get_location
 
 
 # --------------------------------------------------------------------------- #

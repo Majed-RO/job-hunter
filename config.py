@@ -168,8 +168,12 @@ MAX_AGE_DAYS = 5         # belt-and-suspenders on top of HOURS_OLD; catches rows
 # "Over 100"), so a crowded posting is scored, not dropped: it just needs a
 # stronger match to be shortlisted, and is marked "Crowded" there.
 CROWDED_APPLICANTS = 100         # more applicants than this = crowded
-CROWDED_MIN_OVERALL_SCORE = 80   # min "overall" for a crowded posting to be
-                                 # shortlisted (instead of MIN_OVERALL_SCORE)
+CROWDED_MIN_OVERALL_SCORE = 72   # min "overall" for a crowded posting to be
+                                 # shortlisted (instead of MIN_OVERALL_SCORE).
+                                 # The scorer gives overall in steps (..62, 72,
+                                 # 78, 82..): 80 meant 82, which no crowded
+                                 # posting reached, so 80 hid every one (run of
+                                 # 2026-10-08: both "apply" verdicts at 78).
 # Saturated = Easy Apply with "Over 200" applicants: on Easy Apply the count
 # is mostly real one-click applications (on "Apply on company site" it's
 # clicks), so these are genuinely flooded. Dropped before scoring (listed under

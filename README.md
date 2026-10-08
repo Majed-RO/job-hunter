@@ -586,5 +586,26 @@ fallback being used by accident (a `[warn]` line prints on the fallback).
 ├── config_local.py          ← your real profile + constraints, git-ignored
 ├── resume.md
 ├── (constraints live in config.py — no constraints.txt needed)
-└── README.md
+├── README.md
+└── LICENSE                  ← MIT
 ```
+
+## 10. Responsible use
+
+The script reads public job pages and RSS feeds, one request at a time, with
+pauses in between (`SEARCH_DELAY_SECONDS`, `LINKEDIN_DETAIL_DELAY_SECONDS`,
+`JOBSPS_DETAIL_DELAY_SECONDS`). It doesn't log in, and by default it doesn't
+try to get past blocks: when a site refuses a page (jobs.ps's Cloudflare check, LinkedIn
+throttling), it stops asking and works with what it has.
+
+You run it on your own behalf and are responsible for how you use it. Each
+site has its own terms, and some (LinkedIn's among them) restrict automated
+access, so read them and decide for yourself. Keep the delays as they are or
+longer, keep the result counts modest, and use it for your own job search,
+not to collect or resell data.
+
+## 11. License
+
+[MIT](LICENSE) © 2026 Majed-RO. Use, copy, change and share it freely, including
+commercially; just keep the copyright line and license text in copies. It
+comes as is, with no warranty.

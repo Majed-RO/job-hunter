@@ -183,7 +183,12 @@ CROWDED_MIN_OVERALL_SCORE = 72   # min "overall" for a crowded posting to be
 # clicks), so these are genuinely flooded. Dropped before scoring (listed under
 # "Dropped before scoring" in the shortlist). The public page tops out at
 # "Over 200", parsed as 200, so SATURATED_APPLICANTS above 200 never matches.
-DROP_SATURATED_EASY_APPLY = True
+# Off since 2026-10-08: it dropped good matches unscored (Hayah Health, React/
+# TS/Supabase freelance), and once LinkedIn's newer Easy Apply button was read
+# it would also have dropped 3 of that day's 4 best postings. Saturated
+# postings are now scored like any crowded one (CROWDED_MIN_OVERALL_SCORE)
+# and marked Crowded + Easy Apply in the shortlist.
+DROP_SATURATED_EASY_APPLY = False
 SATURATED_APPLICANTS = 200
  
 # Blocked postings are never sent to the LLM — they cost nothing, but they also

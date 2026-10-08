@@ -141,10 +141,12 @@ def parse_guest_posting(html: str) -> dict:
 
     # Apply button: links back into LinkedIn ("apply-link-onsite" — Easy Apply)
     # or out to the company's site ("apply-link-offsite"). "onsite" here is
-    # about WHERE you apply, not the workplace.
+    # about WHERE you apply, not the workplace. Since 2026-10 some pages use
+    # "apply-link-simple_onsite" (49 of 255 on 2026-10-08), read as Easy Apply
+    # too; the guest page can't confirm it, the logged-in one shows it.
     tracking = " ".join(el.get("data-tracking-control-name", "")
                         for el in soup.select("[data-tracking-control-name*=apply-link]"))
-    info["easy_apply"] = (True if "apply-link-onsite" in tracking
+    info["easy_apply"] = (True if re.search(r"apply-link-(?:simple_)?onsite", tracking)
                           else False if "apply-link-offsite" in tracking else None)
     return info
 

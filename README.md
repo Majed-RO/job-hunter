@@ -325,7 +325,10 @@ matched skills, gaps, and any blockers for each. Each entry's first line
 reads like `linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract
 · Easy Apply`, and `likely_onsite` postings get a **Check workplace badge**
 line — open those and look at the On-site/Remote/Hybrid badge before applying.
-After the shortlist comes **Dropped before scoring**: every posting the free
+After the shortlist comes **Rated apply/maybe but under a threshold**: postings
+the LLM liked that a score threshold held back (e.g. a crowded posting under
+`CROWDED_MIN_OVERALL_SCORE`), each with the threshold it missed.
+Then **Dropped before scoring**: every posting the free
 pre-filter removed, grouped by reason, with title, company and link, so a
 wrong drop is quick to spot. "not confirmed remote" and "older than N days"
 are nearly always right and very noisy, so they show only a count (the rows

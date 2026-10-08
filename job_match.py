@@ -288,6 +288,7 @@ def dedupe_title(title: str) -> str:
 
 
 _WIDE_KEYWORDS = [re.compile(p, re.I) for p in getattr(config, "WIDE_REQUIRED_KEYWORDS", [])]
+_WIDE_LABEL = "wide search: no stack keyword (React/Next/TS/Node/JS)"
 
 
 def prefilter(row) -> str | None:
@@ -311,7 +312,7 @@ def prefilter(row) -> str | None:
     wide = row.get("wide_only")
     if pd.notna(wide) and wide:
         if not any(p.search(text) for p in _WIDE_KEYWORDS):
-            return "wide search: no stack keyword (React/Next/TS/Node/JS)"
+            return _WIDE_LABEL
 
     # LinkedIn's own "remote only" search filter (f_WT=2) is a request-side
     # hint, not a guarantee — promoted/sponsored listings have been observed
@@ -854,7 +855,14 @@ def dropped_lines(df: pd.DataFrame) -> list[str]:
     dropped = df[df["reason"] == "filtered out before scoring"]
     if not len(dropped):
         return []
-    groups = dropped["blockers"].astype(str).str.replace(r"\s*\(.*\)$", "", regex=True)
+    # Labels with a per-row detail in parentheses, e.g. "saturated Easy Apply
+    # (Over 200 applicants)", are grouped without it. Fixed labels that have
+    # their own parentheses, e.g. "clearance (TS/SCI)", are kept whole.
+    fixed = ({_WIDE_LABEL} | {e[0] for e in config.HARD_BLOCKERS}
+             | {e[0] for e in getattr(config, "TITLE_BLOCKERS", [])})
+    blockers = dropped["blockers"].astype(str)
+    groups = blockers.where(blockers.isin(fixed),
+                            blockers.str.replace(r"\s*\(.*\)$", "", regex=True))
     lines = ["---", "", f"## Dropped before scoring ({len(dropped)})", "",
              "Removed by the free pre-filter, never sent to the LLM. Skim for anything "
              "that shouldn't have been dropped.", ""]
@@ -868,6 +876,32 @@ def dropped_lines(df: pd.DataFrame) -> list[str]:
             lines.append(f"  - [{r['title']}]({r['job_url']}) — "
                          f"{_str_or(r.get('company'), 'company not listed')}"
                          + (f" {detail}" if detail else ""))
+    return lines + [""]
+
+
+def near_miss_lines(df: pd.DataFrame, site: str, verdicts: list[str]) -> list[str]:
+    """Markdown list of one site's postings the LLM rated apply/maybe that
+    missed a score threshold, with which one, so a good match held back by a
+    threshold (e.g. the crowded one) is still seen."""
+    missed = df[df["verdict"].astype(str).str.lower().isin(verdicts) & ~df["passes_threshold"]]
+    if not len(missed):
+        return []
+    min_overall, min_stack = min_scores(site)
+    lines = ["---", "", f"## Rated {'/'.join(verdicts)} but under a threshold ({len(missed)})", "",
+             "Not shortlisted because a score was below its threshold. Skim these too.", ""]
+    for _, r in missed.iterrows():
+        why = []
+        if r["overall"] < min_overall:
+            why.append(f"overall {r['overall']} < {min_overall}")
+        elif is_crowded(r) and r["overall"] < config.CROWDED_MIN_OVERALL_SCORE:
+            why.append(f"crowded ({_str_or(r.get('applicants_text'), str(r.get('applicants')))}): "
+                       f"overall {r['overall']} < {config.CROWDED_MIN_OVERALL_SCORE}")
+        if r["stack_fit"] < min_stack:
+            why.append(f"stack_fit {r['stack_fit']} < {min_stack}")
+        lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
+                     f"{_str_or(r.get('company'), 'company not listed')} · {'; '.join(why)}"
+                     + (" · check workplace badge" if _flag(r.get("likely_onsite")) else ""))
+        lines.append(f"  - {r['reason']}")
     return lines + [""]
 
 
@@ -997,6 +1031,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
+    lines += near_miss_lines(df, site, verdicts)
     lines += dropped_lines(df)
     lines += run_metrics_lines(site, funnel, top, verdicts)
     return lines

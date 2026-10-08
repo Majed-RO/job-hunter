@@ -20,7 +20,7 @@ Install:
 Setup:
     Create a .env file (see .env.example) with:
         OPENROUTER_API_KEY=sk-or-...
-        OPENROUTER_MODEL=anthropic/claude-haiku-4.5   # optional, overrides config.MODEL_NAME
+        OPENROUTER_MODEL=anthropic/claude-haiku-5.5   # optional, overrides config.MODEL_NAME
 
     To score with Gemini's API directly instead of via OpenRouter (its free
     tier is worth it for high-volume runs), also set:
@@ -137,7 +137,11 @@ logistics_fit is below 20 and overall is capped at 30.
 If the posting's "Workplace check" line warns it may be on-site or hybrid, treat the
 workplace as unconfirmed: logistics_fit at most 50 and verdict at most "maybe", unless
 the description explicitly says the role is fully remote for people outside that
-location. Wording like "Remote/Hybrid" or "remote or on-site" does NOT confirm it."""
+location. Wording like "Remote/Hybrid" or "remote or on-site" does NOT confirm it.
+An unconfirmed workplace alone is not a reason to skip: if the posting is otherwise a
+good fit, the verdict is "maybe" so the candidate can check the workplace badge. Skip
+only for what the text actually states (a required location, on-site days, timezone,
+work authorization, ...) or a poor fit."""
 
 USER_TEMPLATE = """<candidate_resume>
 {resume}
@@ -414,7 +418,10 @@ def cache_key(resume: str, constraints: str, row) -> str:
     # are in it so editing them re-scores the postings they apply to.
     # A jobs.ps feed-only posting (page blocked) gets its own key, so once its
     # page can be fetched it's re-scored from the full description.
-    blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{row.get('job_url')}|{row.get('title')}|"
+    # The system prompt and reasoning effort change the answer too, so they're
+    # in it: editing either re-scores instead of serving the old scores.
+    blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{SYSTEM_PROMPT}|"
+            f"effort={getattr(config, 'MODEL_REASONING_EFFORT', None)}|{row.get('job_url')}|{row.get('title')}|"
             f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}"
             + ("|feed_only" if _flag(row.get("feed_only")) else ""))
     return hashlib.sha1(blob.encode()).hexdigest()
@@ -480,11 +487,13 @@ def make_llm_client():
 
 
 def _call_openrouter(client: OpenAI, prompt: str) -> str:
+    effort = getattr(config, "MODEL_REASONING_EFFORT", None)
     msg = client.chat.completions.create(
         model=MODEL,
-        max_tokens=700,
+        max_tokens=getattr(config, "MODEL_MAX_TOKENS", 4000),  # thinking counts toward it
         temperature=config.MODEL_TEMPERATURE,
         response_format={"type": "json_object"},  # not all OpenRouter models honor this; parse_json() has a fallback
+        extra_body={"reasoning": {"effort": effort}} if effort else None,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},

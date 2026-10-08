@@ -96,7 +96,7 @@ pip install pypdf python-docx
 
 ```
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=anthropic/claude-haiku-4.5
+OPENROUTER_MODEL=anthropic/claude-haiku-5.5
 ```
 
 `OPENROUTER_MODEL` in `.env` is optional — if you leave it out, the script
@@ -173,7 +173,7 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | Variable | Meaning |
 |---|---|
 | `MAX_AGE_DAYS` | Deterministic, runs before scoring. A backstop on top of `HOURS_OLD` for rows with a stale `date_posted` that slip through. |
-| `CROWDED_APPLICANTS` / `CROWDED_MIN_OVERALL_SCORE` | A LinkedIn posting with **more** than `CROWDED_APPLICANTS` applicants (100) is "crowded": it is still scored, but needs `overall >= CROWDED_MIN_OVERALL_SCORE` (72) instead of `MIN_OVERALL_SCORE` to be shortlisted, and is marked **Crowded** there. Counts come from LinkedIn's public job page: "91 applicants" → 91, "Over 200 applicants" → 200, "Be among the first 25 applicants" → 0. They count clicks on Apply, not finished applications, and the public page can show a higher bucket than the logged-in view ("Over 200" vs "Over 100"), so crowded postings aren't dropped outright. Indeed publishes no count. |
+| `CROWDED_APPLICANTS` / `CROWDED_MIN_OVERALL_SCORE` | A LinkedIn posting with **more** than `CROWDED_APPLICANTS` applicants (100) is "crowded": it is still scored, but needs `overall >= CROWDED_MIN_OVERALL_SCORE` (60, currently the same as `MIN_OVERALL_SCORE`, so crowded postings are only marked) instead of `MIN_OVERALL_SCORE` to be shortlisted, and is marked **Crowded** there. Counts come from LinkedIn's public job page: "91 applicants" → 91, "Over 200 applicants" → 200, "Be among the first 25 applicants" → 0. They count clicks on Apply, not finished applications, and the public page can show a higher bucket than the logged-in view ("Over 200" vs "Over 100"), so crowded postings aren't dropped outright. Indeed publishes no count. |
 | `DROP_SATURATED_EASY_APPLY` / `SATURATED_APPLICANTS` | Off (`False`) by default: it dropped good matches unscored, so saturated postings are scored as crowded instead and marked **Easy Apply** in the shortlist. Easy Apply is read from the Apply button's tracking name: `apply-link-onsite` or the newer `apply-link-simple_onsite` (Easy Apply), `apply-link-offsite` (company site). `True` drops **Easy Apply** postings with at least `SATURATED_APPLICANTS` (200, i.e. "Over 200") applicants before scoring. On Easy Apply the count is mostly real one-click applications, so these are genuinely flooded; on "Apply on company site" the count is clicks, so those are scored as crowded instead. The public page tops out at "Over 200", so values above 200 never match. Dropped postings are listed under "Dropped before scoring" in the shortlist. |
 | `LINKEDIN_DETAIL_DELAY_SECONDS` | Pause between LinkedIn job-page requests (plus a little random jitter). Adds roughly this many seconds per LinkedIn posting to a run. |
 | `LINKEDIN_DETAIL_MAX_FAILURES` | Stop fetching LinkedIn pages after this many failures in a row (LinkedIn is throttling). Unfetched postings are skipped as `no description` rather than scored blind. |
@@ -183,9 +183,9 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `WORKPLACE_BLOCKER_LABELS` | The `HARD_BLOCKERS` labels that are about workplace (onsite/hybrid/return to office). Skipped for sites where `SITE_REMOTE_ONLY` is `False`; every other blocker still applies there. |
 | *(not a config variable)* `is_remote` backstop | When `IS_REMOTE`/`--remote` is on, any posting whose `is_remote` field is explicitly `False` is blocked as `"not confirmed remote"`. For LinkedIn the script computes it from title + description + location using JobSpy's keyword list ("remote", "work from home", "wfh"); for Indeed it's JobSpy's own value. Catches onsite postings that slipped past LinkedIn's/Indeed's own remote filter (seen in practice with LinkedIn's "Promoted by hirer" listings). A missing/unknown value (JobSpy couldn't tell either way) is never blocked on this alone. |
 | `PREFILTER_DRY_RUN` | `True` scores every posting as normal but records what the pre-filter *would* have blocked in a new `prefilter_flag` column, so you can compare the regex verdict against the LLM's on the same run. Costs full price — use it for a run or two after editing `HARD_BLOCKERS`, then set back to `False`. |
-| `MIN_OVERALL_SCORE` | Postings below this `overall` score (0–100, from the LLM) are excluded from the shortlists. Still appear in the CSV. Currently 67 — low enough that solid "maybe" postings (typically ~72) make the shortlist. |
+| `MIN_OVERALL_SCORE` | Postings below this `overall` score (0–100, from the LLM) are excluded from the shortlists. Still appear in the CSV. Currently 60, tuned for Haiku 5.5, which puts good matches at about 60–75. Scores aren't comparable across models, so re-check this after changing `MODEL_NAME`. |
 | `SHORTLIST_VERDICTS` | Which LLM verdicts can appear in the shortlists: `["apply", "maybe"]`. A "skip" is never shortlisted even if its score clears the bar. |
-| `MIN_SKILL_MATCH_PERCENT` | Same, applied to the LLM's `stack_fit` sub-score. |
+| `MIN_SKILL_MATCH_PERCENT` | Same, applied to the LLM's `stack_fit` sub-score. Currently 70. |
 | `SITE_MIN_OVERALL_SCORE` / `SITE_MIN_SKILL_MATCH_PERCENT` | Per-site overrides of the two thresholds above, e.g. `{"jobsps": 0}`. Sites not listed use the global value. Each shortlist and the run summary print the thresholds actually used for that site. |
 | `DUMP_SKIPPED_DESCRIPTIONS` | `True` writes every LLM-verdicted `skip` posting's full description to `output/skipped_descriptions/<row>.md`, alongside the LLM's reason/blockers — useful for checking a blocker regex against the real posting text instead of the LLM's paraphrase. `False` by default (one file per skip). |
 
@@ -194,8 +194,10 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 |---|---|
 | `LLM_PROVIDER` | `"openrouter"` (default) or `"gemini"` — which API scores postings. See "Scoring provider" in §3 above for the cost/setup trade-off. Overridden by `LLM_PROVIDER` in `.env` if set there. |
 | `MODEL_NAME` | Used when `LLM_PROVIDER == "openrouter"`. Any model slug OpenRouter serves — check [openrouter.ai/models](https://openrouter.ai/models) for current, exact names before switching, since these strings change and a stale one fails the call. Overridden by `OPENROUTER_MODEL` in `.env` if set there. |
+| `MODEL_REASONING_EFFORT` | OpenRouter reasoning effort sent with each call: `"low"`, `"medium"`, `"high"`, or `None` to send none (for models without a reasoning setting). Haiku 5.5 thinks before answering by default; `"low"` keeps that short and cheap. Part of the score cache key, so changing it re-scores. |
+| `MODEL_MAX_TOKENS` | Cap on each answer, **thinking included** (4000). Too low and a thinking model spends it all before writing the JSON: at the old 700, Haiku 5.5 failed 37 of 40 postings. |
 | `GEMINI_MODEL_NAME` | Used when `LLM_PROVIDER == "gemini"`. Any slug Google's API serves (e.g. `gemini-2.5-flash`). Overridden by `GEMINI_MODEL` in `.env` if set there. |
-| `MODEL_TEMPERATURE` | Lower = more consistent scoring across similar postings. `0.1` is a reasonable default for a scoring task; there's little reason to raise it. Applies to both providers. |
+| `MODEL_TEMPERATURE` | Lower = more consistent scoring across similar postings. Ignored by models that don't take it, Haiku 5.5 among them, so expect small run-to-run differences in its scores. `0.1` is a reasonable default for a scoring task; there's little reason to raise it. Applies to both providers. |
 | `MAX_RETRIES` | How many times to retry a failed API call (rate limits, transient errors) before giving up on that posting. |
 | `RETRY_DELAY_SECONDS` | Base delay for exponential backoff between retries — actual delays are `RETRY_DELAY_SECONDS × 2^attempt` (e.g. 3s, 6s, 12s). |
 

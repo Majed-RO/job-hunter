@@ -27,7 +27,9 @@ Files: `job_match.py` (pipeline), `config.py` (all tunables),
 ## Decisions already made (don't re-litigate)
 
 - **OpenRouter, not a direct Anthropic key.** Default model
-  `anthropic/claude-haiku-4.5`. `OPENROUTER_MODEL` in `.env` overrides
+  `anthropic/claude-haiku-5.5` at reasoning effort `low` (from Haiku 4.5 on
+  2026-10-08: about 7x cheaper per posting and stricter on stated blockers;
+  thresholds re-tuned to 60/70). `OPENROUTER_MODEL` in `.env` overrides
   `config.MODEL_NAME` — the user noted this is redundant for a single machine
   and may drop the `.env` line.
 - **`.env` file, not `export`.** Loaded via `python-dotenv`.

@@ -173,12 +173,13 @@ MAX_AGE_DAYS = 5         # belt-and-suspenders on top of HOURS_OLD; catches rows
 # "Over 100"), so a crowded posting is scored, not dropped: it just needs a
 # stronger match to be shortlisted, and is marked "Crowded" there.
 CROWDED_APPLICANTS = 100         # more applicants than this = crowded
-CROWDED_MIN_OVERALL_SCORE = 72   # min "overall" for a crowded posting to be
+CROWDED_MIN_OVERALL_SCORE = 60   # min "overall" for a crowded posting to be
                                  # shortlisted (instead of MIN_OVERALL_SCORE).
-                                 # The scorer gives overall in steps (..62, 72,
-                                 # 78, 82..): 80 meant 82, which no crowded
-                                 # posting reached, so 80 hid every one (run of
-                                 # 2026-10-08: both "apply" verdicts at 78).
+                                 # Same as MIN_OVERALL_SCORE since the switch to
+                                 # Haiku 5.5 (2026-10-08), which scores lower and
+                                 # stricter than 4.5: a crowded posting is only
+                                 # marked Crowded. Raise it to make them clear a
+                                 # higher bar again.
 # Saturated = Easy Apply with "Over 200" applicants: on Easy Apply the count
 # is mostly real one-click applications (on "Apply on company site" it's
 # clicks), so these are genuinely flooded. Dropped before scoring (listed under
@@ -273,8 +274,12 @@ TITLE_BLOCKERS = [
 PREFILTER_DRY_RUN = False
  
 # --- Post-scoring filter (applied to the LLM's output) ---
-MIN_OVERALL_SCORE = 67         # postings below this "overall" score are excluded from shortlist.md
-MIN_SKILL_MATCH_PERCENT = 75   # same, applied to the LLM's "stack_fit" score
+# Tuned for Haiku 5.5 (2026-10-08) on 40 postings re-scored from that day's
+# run: it scores lower than Haiku 4.5 (good matches at 60-70, not 72-78), and
+# 60/70 kept the plausible ones (BairesDev 70, Intellias 68, Deel 62, laiout
+# 60). Re-check after a model change: scores aren't comparable across models.
+MIN_OVERALL_SCORE = 60         # postings below this "overall" score are excluded from shortlist.md
+MIN_SKILL_MATCH_PERCENT = 70   # same, applied to the LLM's "stack_fit" score
 # Per-site overrides of the two scores above; sites not listed use them as-is.
 # jobs.ps also targets admin/coordination roles (SITE_EXTRA_CONSTRAINTS). The
 # LLM still scores stack_fit against the web stack for some of those (an
@@ -302,17 +307,28 @@ LLM_PROVIDER = "openrouter"   # "openrouter" | "gemini"
 
 # Used when LLM_PROVIDER == "openrouter". Any slug from
 # https://openrouter.ai/models (check that page for current, exact slugs
-# before switching models). Examples: "anthropic/claude-haiku-4.5",
+# before switching models). Examples: "anthropic/claude-haiku-5.5",
 # "google/gemini-2.5-flash", "openai/gpt-4.1-mini".
 # OPENROUTER_MODEL in .env overrides this if both are set.
-MODEL_NAME = "anthropic/claude-haiku-4.5"
+MODEL_NAME = "anthropic/claude-haiku-5.5"
+
+# OpenRouter's reasoning effort for MODEL_NAME: "low" | "medium" | "high", or
+# None to send no reasoning setting (for models without one). Haiku 5.5 thinks
+# before answering by default; on 40 test postings, "low" spent ~600 tokens
+# thinking, scored all 40 and caught blockers Haiku 4.5 missed (US Pacific
+# hours, "based in UAE"), at ~$0.0009 a posting vs ~$0.0058 on 4.5. With
+# thinking off it was cheaper still but stricter and coarser.
+MODEL_REASONING_EFFORT = "low"
+# Cap on each answer, thinking included. Haiku 5.5's thinking used all of the
+# old 700 and 37 of 40 answers were cut off; "low" used up to ~1,200 in all.
+MODEL_MAX_TOKENS = 4000
 
 # Used when LLM_PROVIDER == "gemini". Any slug Google's API serves, e.g.
 # "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro".
 # GEMINI_MODEL in .env overrides this if both are set.
 GEMINI_MODEL_NAME = "gemini-2.5-flash-lite"
 
-MODEL_TEMPERATURE = 0.1
+MODEL_TEMPERATURE = 0.1    # ignored by models that don't take it (e.g. Haiku 5.5)
 MAX_RETRIES = 3             # retry count for API errors / rate limits
 RETRY_DELAY_SECONDS = 3     # base delay for exponential backoff (3s, 6s, 12s, ...)
 

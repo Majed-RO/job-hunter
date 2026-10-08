@@ -25,6 +25,7 @@ from urllib.parse import unquote, urlsplit
 import pandas as pd
 
 import config
+from sources.common import utf8_console
 
 HISTORY_PATH = Path(config.OUTPUT_DIR) / config.HISTORY_FILENAME
 # Same id pattern sources/linkedin.py uses, plus the currentJobId= form that
@@ -97,6 +98,7 @@ def main(urls: list[str]) -> None:
 
 
 if __name__ == "__main__":
+    utf8_console()
     links = sys.argv[1:] or [line.strip() for line in sys.stdin if line.strip()]
     if not links:
         sys.exit(__doc__)

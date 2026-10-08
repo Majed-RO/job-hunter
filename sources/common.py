@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import re
+import sys
 import time
 from datetime import date
 
@@ -30,6 +31,15 @@ _COMPILED_TITLE_BLOCKERS = [
     (entry[0], re.compile(entry[1], re.I), re.compile(entry[2], re.I) if len(entry) > 2 else None)
     for entry in getattr(config, "TITLE_BLOCKERS", [])
 ]
+
+
+def utf8_console() -> None:
+    """Print UTF-8 even when output goes to a file on Windows (e.g. a Task
+    Scheduler log), where Python otherwise uses cp1252, which has no "→" or
+    "⚠" and would crash the run. A no-op where the console is already UTF-8."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def title_blocked(title: str) -> str | None:

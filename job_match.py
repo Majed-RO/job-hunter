@@ -67,7 +67,7 @@ from openai import OpenAI
 
 import config
 from sources import REGISTRY, load_source
-from sources.common import RUN_STATS, STANDARD_COLUMNS, days_since, title_blocked
+from sources.common import RUN_STATS, STANDARD_COLUMNS, days_since, title_blocked, utf8_console
 
 load_dotenv()  # reads .env in the current directory into os.environ, if present
 
@@ -1089,6 +1089,7 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
 
 
 def main() -> None:
+    utf8_console()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--resume", help="resume file (.md/.txt/.pdf/.docx); "

@@ -54,6 +54,9 @@ LOCATIONS = [
 # (e.g. `--sites jobsps --locations ramallah-jobs`).
 # - linkedin / indeed: country or region names, as described for LOCATIONS.
 #   Indeed skips anything that isn't a country it supports (MENA, Worldwide).
+#   Not listed below, so they follow LOCATIONS, including a LOCATIONS set in
+#   config_local.py (a "linkedin": LOCATIONS entry here would keep this
+#   file's list and ignore that one).
 # - jobsps: jobs.ps location slugs, the last part of the location page URL
 #   (https://www.jobs.ps/locations/gaza-jobs -> "gaza-jobs"). Others:
 #   ramallah-jobs, nablus-jobs, hebron-jobs, jerusalem-jobs. "gaza-jobs" is
@@ -61,8 +64,6 @@ LOCATIONS = [
 #   only if their category is in JOBSPS_CATEGORIES. An empty list here reads
 #   the JOBSPS_CATEGORIES feeds directly instead, from all locations.
 SITE_LOCATIONS = {
-    "linkedin": LOCATIONS,
-    "indeed": LOCATIONS,
     "jobsps": ["gaza-jobs"],
     # We Work Remotely: kept when the posting's region contains one of these
     # (case-insensitive). Other regions seen: "North America Only",

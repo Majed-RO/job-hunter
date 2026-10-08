@@ -1,8 +1,373 @@
 # Job Hunter — job_match.py
 
-Pulls fresh postings from LinkedIn, Indeed, jobs.ps and We Work Remotely, scores each one
-against your resume with an LLM (routed through OpenRouter), and writes a
-sorted, filtered shortlist per site.
+English · [العربية](#باختصار)
+
+## In short
+
+**What is it?** A script that searches job sites (LinkedIn, Indeed, We Work
+Remotely, and jobs.ps for Palestine) for new jobs, asks an AI to compare each
+one with your resume and your requirements (remote or not, location, skills),
+and gives you a short list of the jobs worth applying to. It runs on your own
+computer, whenever you start it.
+
+**What you need**
+
+- A Windows, Mac or Linux computer, and about 20 minutes for the first setup.
+- Your resume as plain text (copy it out of your Word file or PDF).
+- A key for an AI service. It works like a password that lets the script use
+  the AI. Pick one:
+  - **OpenRouter** (recommended): pay as you go. Sign up at
+    [openrouter.ai](https://openrouter.ai), add a few dollars of credit, then
+    open **Keys** and click **Create Key**. With the default AI model, a run
+    costs roughly $0.10–0.30.
+  - **Google Gemini**: get a key at
+    [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Google
+    has offered a free tier for its Flash models, but it allows only a few
+    requests a minute, so a run takes much longer.
+
+  Keep your key private: anyone who has it can spend your credit.
+
+### Set it up (once)
+
+<details>
+<summary><b>Windows</b> (click to open)</summary>
+
+1. **Install Python.** Download it from
+   [python.org/downloads](https://www.python.org/downloads/) and run the
+   installer. On its first screen, tick **Add python.exe to PATH**, then click
+   **Install Now**.
+2. **Download the script.** On this page, click the green **Code** button,
+   then **Download ZIP**. Right-click the downloaded file, choose
+   **Extract All**, then **Extract**. You get a folder called
+   `job-hunter-main`.
+3. **Open a terminal in that folder.** A terminal is a window where you type
+   commands. Open the `job-hunter-main` folder, click the address bar at the
+   top of the window, type `powershell` and press **Enter**.
+4. **Install what the script needs.** Copy each line below into the terminal
+   (paste with **Ctrl+V** or a right-click) and press **Enter**. Wait for each
+   one to finish before the next; the second takes a minute or two.
+   ```
+   python -m venv .venv
+   .venv\Scripts\python -m pip install -U python-jobspy openai pandas python-dotenv
+   ```
+5. **Add your AI key.** Type `notepad .env` and press **Enter**. Notepad asks
+   whether to create the file: click **Yes**. Type this line with your own key
+   after the `=`, then save with **Ctrl+S** and close Notepad:
+   ```
+   OPENROUTER_API_KEY=sk-or-...
+   ```
+   Using Gemini instead? See [Choosing the AI](#choosing-the-ai).
+6. **Add your resume.** Type `notepad resume.md`, press **Enter**, click
+   **Yes**, paste your resume text, save and close.
+7. **Add your settings.** Type `notepad config_local.py`, press **Enter**,
+   click **Yes**, paste [the settings below](#your-settings), change them to
+   fit you, save and close.
+
+</details>
+
+<details>
+<summary><b>macOS / Linux</b> (click to open)</summary>
+
+1. **Install Python.**
+   - Mac: download it from
+     [python.org/downloads](https://www.python.org/downloads/) and run the
+     installer.
+   - Linux: Python is usually already installed. On Ubuntu or Debian, also run
+     `sudo apt install python3-venv` in a terminal.
+2. **Download the script.** On this page, click the green **Code** button,
+   then **Download ZIP**, and double-click the downloaded file to unzip it.
+   You get a folder called `job-hunter-main`.
+3. **Open a terminal in that folder.** A terminal is a window where you type
+   commands.
+   - Mac: press **Cmd+Space**, type `Terminal` and press **Enter**. Type `cd `
+     (with a space after it), drag the `job-hunter-main` folder into the
+     window, and press **Enter**.
+   - Linux: open the folder, right-click inside it and choose
+     **Open in Terminal**.
+4. **Install what the script needs.** Copy each line below into the terminal
+   and press **Enter**. Wait for each one to finish before the next.
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/python -m pip install -U python-jobspy openai pandas python-dotenv
+   ```
+5. **Add your AI key.** Type `nano .env` and press **Enter**. Type this line
+   with your own key after the `=`, then press **Ctrl+O** and **Enter** to
+   save, and **Ctrl+X** to close:
+   ```
+   OPENROUTER_API_KEY=sk-or-...
+   ```
+   Using Gemini instead? See [Choosing the AI](#choosing-the-ai).
+6. **Add your resume.** Type `nano resume.md`, press **Enter**, paste your
+   resume text (**Cmd+V** on a Mac, **Ctrl+Shift+V** on Linux), then
+   **Ctrl+O**, **Enter**, **Ctrl+X**.
+7. **Add your settings.** Type `nano config_local.py`, press **Enter**, paste
+   [the settings below](#your-settings), change them to fit you, then
+   **Ctrl+O**, **Enter**, **Ctrl+X**.
+
+</details>
+
+### Your settings
+
+This goes in `config_local.py`. Change the text inside the quotes and keep the
+rest as it is.
+
+```python
+# Job titles to search for, and where. "Worldwide" finds remote jobs open to any country.
+SEARCH_TERMS = ["React developer", "Frontend engineer"]
+LOCATIONS = ["Worldwide", "United Arab Emirates"]
+
+# Job sites to search. Add "jobsps" for jobs in Palestine.
+SOURCES = ["linkedin", "indeed", "weworkremotely"]
+
+# Extra broad searches tuned to the author's skills. Leave this empty.
+WIDE_SEARCH_TERMS = []
+
+# Your requirements in plain words. The AI reads this to judge each job.
+CONSTRAINTS = """
+Location: based in Egypt (UTC+2). Cannot relocate.
+Work setup: fully remote only.
+Seniority: mid-senior. Not looking for junior roles.
+Not interested in: WordPress, sales roles.
+"""
+```
+
+By default the script looks for remote jobs only, and skips jobs that require
+US citizenship or US work authorization. If you live in the US, or want
+on-site jobs too, see `IS_REMOTE` and `HARD_BLOCKERS` in
+[section 4](#4-configpy--every-variable-explained).
+
+### Run it
+
+Each time you want new jobs, open a terminal in the `job-hunter-main` folder
+(step 3 above) and run this one command.
+
+Windows:
+```
+.venv\Scripts\python job_match.py --resume resume.md
+```
+macOS / Linux:
+```bash
+.venv/bin/python job_match.py --resume resume.md
+```
+
+A run takes about 10–20 minutes, and the terminal shows its progress. It looks
+at jobs from the last 4 days, so running it every 2–3 days is enough.
+
+### Read the results
+
+Open the `output` folder inside `job-hunter-main`:
+
+- **`shortlist_linkedin.md`** (one file per job site): the jobs worth applying
+  to, best first, each with its link, why it fits, and what your resume is
+  missing. Under them come the jobs that nearly made it, then the ones skipped
+  before the AI saw them.
+- **`run_summary.md`**: what happened in the run, in numbers.
+
+These are plain text files. Open them with Notepad or TextEdit (right-click,
+then **Open with**), or with [VS Code](https://code.visualstudio.com/), which
+shows them neatly formatted.
+
+### Choosing the AI
+
+- **Default:** Claude Haiku 5.5 through OpenRouter. It's cheap and careful, and
+  the score limits that decide the shortlist are tuned for it.
+- **Another model on OpenRouter:** add a line to `config_local.py`, for example
+  `MODEL_NAME = "google/gemini-2.5-flash"`. Model names are listed at
+  [openrouter.ai/models](https://openrouter.ai/models). Each model scores
+  differently: after the first run, look at the "under a threshold" part of
+  the shortlist, and if good jobs end up there, add a lower limit to
+  `config_local.py`, e.g. `MIN_OVERALL_SCORE = 50`.
+- **Google Gemini directly:** put these two lines in `.env` instead of the
+  OpenRouter one:
+  ```
+  LLM_PROVIDER=gemini
+  GEMINI_API_KEY=your-gemini-key
+  ```
+  Then install one more package. Windows:
+  `.venv\Scripts\python -m pip install google-genai`. macOS / Linux:
+  `.venv/bin/python -m pip install google-genai`.
+
+Everything is explained in full in the sections below.
+
+<div dir="rtl" lang="ar">
+
+## باختصار
+
+**ما هذا؟** سكربت يبحث عن الوظائف الجديدة في مواقع التوظيف (LinkedIn وIndeed وWe Work
+Remotely، وjobs.ps للوظائف في فلسطين)، ثم يطلب من الذكاء الاصطناعي مقارنة كل وظيفة
+بسيرتك الذاتية وشروطك (العمل عن بُعد، الموقع، المهارات)، ويعطيك قائمة قصيرة بالوظائف
+التي تستحق التقديم. يعمل على جهازك أنت، متى شغّلته.
+
+**ما تحتاجه**
+
+- جهاز ويندوز أو ماك أو لينكس، وحوالي 20 دقيقة للإعداد أول مرة.
+- سيرتك الذاتية كنص عادي (انسخها من ملف Word أو PDF).
+- مفتاح لخدمة ذكاء اصطناعي. المفتاح يشبه كلمة السر التي تسمح للسكربت باستخدام
+  الخدمة. اختر واحدة:
+  - **OpenRouter** (الخيار المقترح): تدفع حسب الاستخدام. أنشئ حسابًا في
+    [openrouter.ai](https://openrouter.ai)، واشحن رصيدًا ببضعة دولارات، ثم افتح
+    **Keys** واضغط **Create Key**. مع النموذج الافتراضي، يكلّف التشغيل الواحد
+    حوالي 0.10 إلى 0.30 دولار.
+  - **Google Gemini**: احصل على مفتاح من
+    [aistudio.google.com/apikey](https://aistudio.google.com/apikey). قدّمت Google
+    باقة مجانية لنماذج Flash، لكنها تسمح بعدد قليل من الطلبات في الدقيقة، فيستغرق
+    التشغيل وقتًا أطول بكثير.
+
+  احتفظ بمفتاحك سرًّا: من يملكه يستطيع إنفاق رصيدك.
+
+### الإعداد (مرة واحدة)
+
+<details>
+<summary><b>ويندوز</b> (اضغط للفتح)</summary>
+
+1. **ثبّت Python.** حمّله من
+   [python.org/downloads](https://www.python.org/downloads/) وشغّل ملف التثبيت. في
+   الشاشة الأولى، فعّل خيار **Add python.exe to PATH**، ثم اضغط **Install Now**.
+2. **حمّل السكربت.** في هذه الصفحة، اضغط الزر الأخضر **Code** ثم **Download ZIP**.
+   اضغط على الملف المحمَّل بالزر الأيمن واختر **Extract All** ثم **Extract**. سيظهر
+   مجلد اسمه <code dir="ltr">job-hunter-main</code>.
+3. **افتح الطرفية (Terminal) داخل المجلد.** الطرفية نافذة تكتب فيها الأوامر. افتح
+   مجلد <code dir="ltr">job-hunter-main</code>، واضغط على شريط العنوان أعلى النافذة، واكتب <code dir="ltr">powershell</code>
+   ثم اضغط **Enter**.
+4. **ثبّت ما يحتاجه السكربت.** انسخ كل سطر من السطرين التاليين إلى الطرفية (الصق
+   بـ **Ctrl+V** أو بالزر الأيمن) واضغط **Enter**. انتظر حتى ينتهي كل أمر قبل التالي؛
+   الثاني يستغرق دقيقة أو دقيقتين.
+   <pre dir="ltr"><code>python -m venv .venv
+   .venv\Scripts\python -m pip install -U python-jobspy openai pandas python-dotenv</code></pre>
+5. **أضف مفتاح الذكاء الاصطناعي.** اكتب هذا الأمر واضغط **Enter**:
+   <pre dir="ltr"><code>notepad .env</code></pre>
+   سيسألك Notepad إن كنت تريد إنشاء الملف: اضغط **Yes**. اكتب هذا السطر ومفتاحك بعد علامة
+   <code dir="ltr">=</code>، ثم احفظ بـ **Ctrl+S** وأغلق Notepad:
+   <pre dir="ltr"><code>OPENROUTER_API_KEY=sk-or-...</code></pre>
+   تستخدم Gemini؟ انظر [اختيار الذكاء الاصطناعي](#اختيار-الذكاء-الاصطناعي).
+6. **أضف سيرتك الذاتية.** اكتب هذا الأمر واضغط **Enter**، ثم **Yes**:
+   <pre dir="ltr"><code>notepad resume.md</code></pre>
+   الصق نص سيرتك الذاتية، واحفظ وأغلق.
+7. **أضف إعداداتك.** اكتب هذا الأمر واضغط **Enter**، ثم **Yes**:
+   <pre dir="ltr"><code>notepad config_local.py</code></pre>
+   الصق [الإعدادات أدناه](#إعداداتك)، وعدّلها لتناسبك، واحفظ وأغلق.
+
+</details>
+
+<details>
+<summary><b>ماك / لينكس</b> (اضغط للفتح)</summary>
+
+1. **ثبّت Python.**
+   - ماك: حمّله من [python.org/downloads](https://www.python.org/downloads/) وشغّل
+     ملف التثبيت.
+   - لينكس: يكون Python مثبّتًا عادةً. على Ubuntu أو Debian، شغّل أيضًا هذا الأمر في الطرفية:
+     <pre dir="ltr"><code>sudo apt install python3-venv</code></pre>
+2. **حمّل السكربت.** في هذه الصفحة، اضغط الزر الأخضر **Code** ثم **Download ZIP**،
+   ثم اضغط مرتين على الملف المحمَّل لفك ضغطه. سيظهر مجلد اسمه <code dir="ltr">job-hunter-main</code>.
+3. **افتح الطرفية (Terminal) داخل المجلد.** الطرفية نافذة تكتب فيها الأوامر.
+   - ماك: اضغط **Cmd+Space** واكتب <code dir="ltr">Terminal</code> ثم **Enter**. اكتب <code dir="ltr">cd</code> ثم مسافة،
+     واسحب مجلد <code dir="ltr">job-hunter-main</code> إلى النافذة، واضغط **Enter**.
+   - لينكس: افتح المجلد، واضغط بالزر الأيمن داخله واختر **Open in Terminal**.
+4. **ثبّت ما يحتاجه السكربت.** انسخ كل سطر من السطرين التاليين إلى الطرفية واضغط
+   **Enter**. انتظر حتى ينتهي كل أمر قبل التالي.
+   <pre dir="ltr"><code>python3 -m venv .venv
+   .venv/bin/python -m pip install -U python-jobspy openai pandas python-dotenv</code></pre>
+5. **أضف مفتاح الذكاء الاصطناعي.** اكتب هذا الأمر واضغط **Enter**:
+   <pre dir="ltr"><code>nano .env</code></pre>
+   ثم اكتب هذا السطر
+   ومفتاحك بعد علامة <code dir="ltr">=</code>، ثم اضغط **Ctrl+O** و**Enter** للحفظ، و**Ctrl+X** للإغلاق:
+   <pre dir="ltr"><code>OPENROUTER_API_KEY=sk-or-...</code></pre>
+   تستخدم Gemini؟ انظر [اختيار الذكاء الاصطناعي](#اختيار-الذكاء-الاصطناعي).
+6. **أضف سيرتك الذاتية.** اكتب هذا الأمر واضغط **Enter**:
+   <pre dir="ltr"><code>nano resume.md</code></pre>
+   الصق نص سيرتك
+   الذاتية (**Cmd+V** على ماك، **Ctrl+Shift+V** على لينكس)، ثم **Ctrl+O** و**Enter**
+   و**Ctrl+X**.
+7. **أضف إعداداتك.** اكتب هذا الأمر واضغط **Enter**:
+   <pre dir="ltr"><code>nano config_local.py</code></pre>
+   الصق
+   [الإعدادات أدناه](#إعداداتك)، وعدّلها لتناسبك، ثم **Ctrl+O** و**Enter** و**Ctrl+X**.
+
+</details>
+
+### إعداداتك
+
+هذا ما تضعه في ملف <code dir="ltr">config_local.py</code>. غيّر النص الموجود بين علامات التنصيص، واترك
+الباقي كما هو. (الأسطر التي تبدأ بعلامة <code dir="ltr">#</code> شروحات بالإنجليزية لا تؤثر على شيء.)
+
+<pre dir="ltr"><code># Job titles to search for, and where. "Worldwide" finds remote jobs open to any country.
+SEARCH_TERMS = ["React developer", "Frontend engineer"]
+LOCATIONS = ["Worldwide", "United Arab Emirates"]
+
+# Job sites to search. Add "jobsps" for jobs in Palestine.
+SOURCES = ["linkedin", "indeed", "weworkremotely"]
+
+# Extra broad searches tuned to the author's skills. Leave this empty.
+WIDE_SEARCH_TERMS = []
+
+# Your requirements in plain words. The AI reads this to judge each job.
+CONSTRAINTS = """
+Location: based in Egypt (UTC+2). Cannot relocate.
+Work setup: fully remote only.
+Seniority: mid-senior. Not looking for junior roles.
+Not interested in: WordPress, sales roles.
+"""</code></pre>
+
+- <code dir="ltr">SEARCH_TERMS</code>: المسميات الوظيفية التي تبحث عنها.
+- <code dir="ltr">LOCATIONS</code>: أين تبحث. كلمة <code dir="ltr">Worldwide</code> تجد وظائف عن بُعد مفتوحة لأي دولة.
+- <code dir="ltr">SOURCES</code>: مواقع التوظيف. أضف <code dir="ltr">"jobsps"</code> للوظائف في فلسطين.
+- <code dir="ltr">CONSTRAINTS</code>: شروطك بكلمات بسيطة، يقرؤها الذكاء الاصطناعي ليحكم على كل وظيفة.
+  يمكنك كتابتها بالعربية أو بالإنجليزية.
+
+افتراضيًا، يبحث السكربت عن وظائف عن بُعد فقط، ويتجاهل الوظائف التي تشترط الجنسية
+الأمريكية أو تصريح العمل في أمريكا. إن كنت تعيش في أمريكا، أو تريد وظائف من المكتب
+أيضًا، انظر <code dir="ltr">IS_REMOTE</code> و<code dir="ltr">HARD_BLOCKERS</code> في [القسم 4](#4-configpy--every-variable-explained)
+(بالإنجليزية).
+
+### التشغيل
+
+كلما أردت وظائف جديدة، افتح الطرفية داخل مجلد <code dir="ltr">job-hunter-main</code> (الخطوة 3 أعلاه)
+وشغّل هذا الأمر الواحد.
+
+ويندوز:
+<pre dir="ltr"><code>.venv\Scripts\python job_match.py --resume resume.md</code></pre>
+ماك / لينكس:
+<pre dir="ltr"><code>.venv/bin/python job_match.py --resume resume.md</code></pre>
+
+يستغرق التشغيل حوالي 10 إلى 20 دقيقة، وتعرض الطرفية تقدّمه. يبحث السكربت في الوظائف
+المنشورة خلال آخر 4 أيام، لذا يكفي تشغيله كل يومين أو ثلاثة.
+
+### قراءة النتائج
+
+افتح مجلد <code dir="ltr">output</code> داخل <code dir="ltr">job-hunter-main</code>:
+
+- **<code dir="ltr">shortlist_linkedin.md</code>** (ملف لكل موقع توظيف): الوظائف التي تستحق التقديم،
+  الأفضل أولًا، مع رابط كل وظيفة وسبب مناسبتها وما ينقص سيرتك الذاتية. بعدها الوظائف
+  التي اقتربت من القائمة، ثم الوظائف التي استُبعدت قبل أن يراها الذكاء الاصطناعي.
+- **<code dir="ltr">run_summary.md</code>**: ملخص التشغيل بالأرقام.
+
+هذه ملفات نصية عادية. افتحها بـ Notepad أو TextEdit (زر أيمن ثم **Open with**)، أو
+بـ [VS Code](https://code.visualstudio.com/) الذي يعرضها بتنسيق مرتب.
+
+### اختيار الذكاء الاصطناعي
+
+- **الافتراضي:** نموذج Claude Haiku 5.5 عبر OpenRouter. رخيص ودقيق، وحدود الدرجات
+  التي تحدد القائمة القصيرة مضبوطة عليه.
+- **نموذج آخر عبر OpenRouter:** أضف سطرًا إلى <code dir="ltr">config_local.py</code>، مثل
+  <code dir="ltr">MODEL_NAME = "google/gemini-2.5-flash"</code>. تجد أسماء النماذج في
+  [openrouter.ai/models](https://openrouter.ai/models). كل نموذج يعطي درجات مختلفة:
+  بعد أول تشغيل، انظر إلى قسم "under a threshold" في القائمة القصيرة، وإن وجدت فيه
+  وظائف جيدة فأضف إلى <code dir="ltr">config_local.py</code> حدًا أدنى أقل، مثل <code dir="ltr">MIN_OVERALL_SCORE = 50</code>.
+- **Google Gemini مباشرة:** ضع هذين السطرين في ملف <code dir="ltr">.env</code> بدلًا من سطر OpenRouter:
+  <pre dir="ltr"><code>LLM_PROVIDER=gemini
+  GEMINI_API_KEY=your-gemini-key</code></pre>
+  ثم ثبّت حزمة إضافية. على ويندوز:
+  <pre dir="ltr"><code>.venv\Scripts\python -m pip install google-genai</code></pre>
+  على ماك / لينكس:
+  <pre dir="ltr"><code>.venv/bin/python -m pip install google-genai</code></pre>
+
+الشرح الكامل لكل شيء (بالإنجليزية) في الأقسام أدناه.
+
+</div>
+
+---
+
+How the pipeline fits together:
 
 ```
 resume + constraints ──▶ sources/<site>.py scrape ──▶ deterministic pre-filter ──▶
@@ -77,6 +442,11 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
 
 ## 2. One-time install
 
+The commands below are for macOS/Linux with the virtual environment activated.
+On Windows, use the commands in **In short** at the top instead: they call
+`.venv\Scripts\python` directly, so nothing needs activating. Elsewhere in this
+README, `python ...` means that same Python.
+
 ```bash
 cd ~/job-hunter
 python3 -m venv .venv
@@ -92,7 +462,7 @@ pip install pypdf python-docx
 
 ## 3. One-time setup
 
-**API key.** Create `.env` in the project folder (copy `.env.example`):
+**API key.** Create `.env` in the project folder:
 
 ```
 OPENROUTER_API_KEY=sk-or-...

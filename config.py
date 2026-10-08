@@ -75,8 +75,12 @@ SITE_LOCATIONS = {
 # mix (still finds applies) but scraped at a smaller volume than everything
 # else, freeing budget for UAE/Qatar (which, unlike MENA, get Indeed
 # coverage too). Locations not listed here use RESULTS_PER_BOARD as-is.
+# Worldwide is the other way round: it gives most of the LinkedIn "apply"
+# verdicts and hit the cap of 15 on every search. A test on 2026-10-08 at 30
+# found 26 postings no run had seen, 4 of them shortlist-worthy (2 "apply").
 LOCATION_RESULTS_OVERRIDE = {
     "United States": 10,
+    "Worldwide": 30,
 }
 
 IS_REMOTE = True

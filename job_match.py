@@ -49,6 +49,8 @@ Outputs (paths set by config.OUTPUT_DIR / config.CACHE_PATH):
 
 from __future__ import annotations
 
+__version__ = "1.0.0"  # see CHANGELOG.md; bump it there and here together
+
 import argparse
 import csv
 import hashlib
@@ -763,7 +765,7 @@ class step_timer:
 
 def _run_header() -> str:
     return (f"Run finished {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-            f"provider {PROVIDER} · model {MODEL}")
+            f"job-hunter {__version__} · provider {PROVIDER} · model {MODEL}")
 
 
 def _scrape_details(site: str) -> str:
@@ -1159,7 +1161,7 @@ def main() -> None:
         sys.exit("OPENROUTER_API_KEY is not set.")
     if PROVIDER == "gemini" and not os.getenv("GEMINI_API_KEY"):
         sys.exit("GEMINI_API_KEY is not set (required when --provider/LLM_PROVIDER=gemini).")
-    print(f"[config] provider={PROVIDER}, model={MODEL}")
+    print(f"[config] job-hunter {__version__} · provider={PROVIDER}, model={MODEL}")
 
     resume = load_resume(args.resume)
     if not args.resume:

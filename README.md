@@ -187,6 +187,23 @@ shows them neatly formatted.
   `.venv\Scripts\python -m pip install google-genai`. macOS / Linux:
   `.venv/bin/python -m pip install google-genai`.
 
+### Updating
+
+When a new version comes out (what changed is in [CHANGELOG.md](CHANGELOG.md)):
+
+1. Download the new ZIP the same way (**Code**, then **Download ZIP**) and
+   unzip it.
+2. Copy these files from your old folder into the new one: `.env`,
+   `resume.md` and `config_local.py`. To keep your history and save on AI
+   costs, also copy the `output` and `.jobcache` folders. Names starting with a
+   dot are hidden: on Windows, turn on **Hidden items** in File Explorer's
+   **View** menu; on a Mac, press **Cmd+Shift+.** in Finder.
+3. In the new folder, do steps 3 and 4 of the setup again (open a terminal,
+   install). Then run it as before, and delete the old folder once it works.
+
+If you downloaded with `git clone`, run `git pull` in the folder instead, then
+the install command from step 4.
+
 Everything is explained in full in the sections below.
 
 <div dir="rtl" lang="ar">
@@ -360,6 +377,22 @@ Not interested in: WordPress, sales roles.
   <pre dir="ltr"><code>.venv\Scripts\python -m pip install google-genai</code></pre>
   على ماك / لينكس:
   <pre dir="ltr"><code>.venv/bin/python -m pip install google-genai</code></pre>
+
+### التحديث
+
+عند صدور نسخة جديدة (التغييرات مذكورة في [CHANGELOG.md](CHANGELOG.md)):
+
+1. حمّل ملف ZIP الجديد بالطريقة نفسها (**Code** ثم **Download ZIP**) وفك ضغطه.
+2. انسخ هذه الملفات من مجلدك القديم إلى الجديد: <code dir="ltr">.env</code> و<code dir="ltr">resume.md</code> و<code dir="ltr">config_local.py</code>.
+   للاحتفاظ بنتائجك السابقة وتوفير تكلفة الذكاء الاصطناعي، انسخ أيضًا مجلدَي
+   <code dir="ltr">output</code> و<code dir="ltr">.jobcache</code>. الملفات التي يبدأ اسمها بنقطة تكون مخفية: على ويندوز، فعّل
+   **Hidden items** من قائمة **View** في مستكشف الملفات؛ وعلى ماك، اضغط <code dir="ltr">Cmd+Shift+.</code>
+   في Finder.
+3. في المجلد الجديد، أعد الخطوتين 3 و4 من الإعداد (افتح الطرفية، ثم التثبيت). بعدها
+   شغّل السكربت كالمعتاد، واحذف المجلد القديم عندما تتأكد أن كل شيء يعمل.
+
+إن كنت حمّلت السكربت بـ <code dir="ltr">git clone</code>، فشغّل <code dir="ltr">git pull</code> داخل المجلد بدلًا من ذلك، ثم أمر
+التثبيت من الخطوة 4.
 
 الشرح الكامل لكل شيء (بالإنجليزية) في الأقسام أدناه.
 
@@ -959,6 +992,7 @@ fallback being used by accident (a `[warn]` line prints on the fallback).
 ├── resume.md
 ├── (constraints live in config.py — no constraints.txt needed)
 ├── README.md
+├── CHANGELOG.md             ← what changed in each version
 └── LICENSE                  ← MIT
 ```
 

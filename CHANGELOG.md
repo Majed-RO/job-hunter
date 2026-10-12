@@ -14,6 +14,18 @@ To get notified of new versions, click **Watch → Custom → Releases** on the
 GitHub page. How to update without losing your settings: see "Updating" in the
 [README](README.md#updating).
 
+## Unreleased
+
+**LinkedIn: closed postings**
+- Postings whose LinkedIn page says "No longer accepting applications" are
+  dropped before scoring, listed under "Dropped before scoring". Before, they
+  were scored and could be shortlisted, and their applicant count was misread
+  as 0 (closed pages show "Be among the first 25 applicants").
+- New `recheck_shortlist.py`: run it before reading `shortlist_linkedin.md`
+  to move postings that closed since the run to the end of the list. LinkedIn
+  often closes popular postings within a day. A "Re-check log" at the bottom
+  of the shortlist records what each re-check moved.
+
 ## 1.0.0 — 2026-10-08
 
 First public version.

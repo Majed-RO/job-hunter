@@ -295,6 +295,7 @@ def dedupe_title(title: str) -> str:
 
 _WIDE_KEYWORDS = [re.compile(p, re.I) for p in getattr(config, "WIDE_REQUIRED_KEYWORDS", [])]
 _WIDE_LABEL = "wide search: no stack keyword (React/Next/TS/Node/JS)"
+CLOSED_LABEL = "no longer accepting applications"
 
 
 def prefilter(row) -> str | None:
@@ -307,6 +308,10 @@ def prefilter(row) -> str | None:
     blocked = title_blocked(title)
     if blocked:
         return blocked
+
+    # LinkedIn page says "No longer accepting applications".
+    if _flag(row.get("closed")):
+        return CLOSED_LABEL
 
     # Page fetch failed (or was cut short by throttling): scoring a title with
     # no description would just be a guess.
@@ -857,7 +862,7 @@ def coverage_text(site: str) -> str | None:
 
 # Pre-filter labels that are nearly always right and very noisy: the dropped
 # section shows only a count for these instead of every posting.
-_COLLAPSED_DROP_LABELS = ("not confirmed remote", "older than")
+_COLLAPSED_DROP_LABELS = ("not confirmed remote", "older than", CLOSED_LABEL)
 
 
 def dropped_lines(df: pd.DataFrame) -> list[str]:

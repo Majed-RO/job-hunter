@@ -163,6 +163,19 @@ Open the `output` folder inside `job-hunter-main`:
   before the AI saw them.
 - **`run_summary.md`**: what happened in the run, in numbers.
 
+LinkedIn closes popular jobs early, often within a day. If you read the
+shortlist a while after the run, run this first. It takes under a minute and
+moves the jobs that are no longer accepting applications to the end of the list.
+
+Windows:
+```
+.venv\Scripts\python recheck_shortlist.py
+```
+macOS / Linux:
+```bash
+.venv/bin/python recheck_shortlist.py
+```
+
 These are plain text files. Open them with Notepad or TextEdit (right-click,
 then **Open with**), or with [VS Code](https://code.visualstudio.com/), which
 shows them neatly formatted.
@@ -358,6 +371,15 @@ Not interested in: WordPress, sales roles.
   التي اقتربت من القائمة، ثم الوظائف التي استُبعدت قبل أن يراها الذكاء الاصطناعي.
 - **<code dir="ltr">run_summary.md</code>**: ملخص التشغيل بالأرقام.
 
+يغلق لينكدإن الوظائف المطلوبة بكثرة مبكرًا، غالبًا خلال يوم. إذا قرأت القائمة بعد
+التشغيل بفترة، شغّل هذا الأمر أولًا. يستغرق أقل من دقيقة، وينقل الوظائف التي لم تعد تقبل
+طلبات إلى آخر القائمة:
+
+ويندوز:
+<pre dir="ltr"><code>.venv\Scripts\python recheck_shortlist.py</code></pre>
+ماك / لينكس:
+<pre dir="ltr"><code>.venv/bin/python recheck_shortlist.py</code></pre>
+
 هذه ملفات نصية عادية. افتحها بـ Notepad أو TextEdit (زر أيمن ثم **Open with**)، أو
 بـ [VS Code](https://code.visualstudio.com/) الذي يعرضها بتنسيق مرتب.
 
@@ -437,13 +459,15 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
    posting's public (logged-out) page itself instead of letting JobSpy do it
    — still one request per posting — and keeps the description plus
    `applicants`, `employment_type` (Contract/Full-time/…), `seniority_level`,
-   `days_old` and `easy_apply`. It also sets `likely_onsite` (see §4). Postings
+   `days_old`, `easy_apply` and `closed` ("No longer accepting
+   applications"). It also sets `likely_onsite` (see §4). Postings
    already blocked by `TITLE_BLOCKERS` are never fetched. Indeed rows keep
    JobSpy's data (`employment_type` and `days_old` come from it; Indeed has no
    applicant count or Easy Apply). The On-site/Remote/Hybrid badge and
    "Promoted by hirer" are **not** on the public page — only when logged in.
 4. **Pre-filters, for free.** Before any API call, drops postings that:
    - match `TITLE_BLOCKERS` (junior/intern titles)
+   - are closed: LinkedIn's page says "No longer accepting applications"
    - have no description (e.g. the LinkedIn/jobs.ps page couldn't be fetched)
    - aren't confirmed remote (the `is_remote` backstop, see §4)
    - are saturated: Easy Apply with "Over 200" applicants — only when `DROP_SATURATED_EASY_APPLY` is on, which it isn't by default (LinkedIn only; otherwise they're scored like other crowded postings and need a higher score instead, see `CROWDED_APPLICANTS`)
@@ -783,6 +807,27 @@ LinkedIn `?currentJobId=` from search or recommendation pages, Indeed
 Remotely match by URL. No
 network calls; history must be on (`ENABLE_HISTORY_LOG`).
 
+### Re-checking the LinkedIn shortlist — `recheck_shortlist.py`
+
+LinkedIn closes postings early, often within a day once hundreds have
+applied. Closed postings are dropped when a run fetches them, but ones that
+close after the run still sit in `shortlist_linkedin.md`. Run this before
+working through the shortlist:
+
+```bash
+python recheck_shortlist.py
+```
+
+It re-opens each shortlisted posting's public page (and its "Also posted as"
+copies) and moves the ones that say "No longer accepting applications" to a
+**Closed since the run** list at the end of the shortlist, with a line under
+the title saying when it was checked. Each re-check also adds an entry to a
+**Re-check log** at the bottom of the file: when it ran, how many postings it
+checked, which ones it moved, and how many of the run's shortlist are left, so
+you can tell the cleaned shortlist from the one the run wrote. A posting with an open copy, or whose
+page can't be fetched, stays where it is. One page request per posting, no
+LLM calls; safe to run again.
+
 **`output/history.csv`** — append-only log across every run, with a
 `run_timestamp` column added as the first column, shared by all sites
 (filter on `site`). The per-site CSV and shortlist files are rewritten each
@@ -979,6 +1024,7 @@ fallback being used by accident (a `[warn]` line prints on the fallback).
 │   └── history.csv           ← append-only, all sites, every run, never overwritten
 ├── job_match.py             ← CLI, pre-filter, scoring, output
 ├── check_missed.py          ← "did the script see this job?" for links you found yourself
+├── recheck_shortlist.py     ← moves LinkedIn postings closed since the run out of the shortlist
 ├── sources/                 ← one module per job site
 │   ├── __init__.py          ← REGISTRY of site name -> module
 │   ├── common.py            ← shared helpers (retrying fetch, title blockers, ...)

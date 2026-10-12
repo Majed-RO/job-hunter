@@ -6,7 +6,7 @@ rest of the page, and its output has a fixed column list, so extra fields
 can't be added through it. Instead JobSpy's LinkedIn description fetch is
 turned off and this module downloads the same public page itself — still one
 request per posting — and keeps: description, applicant count, employment
-type, seniority, post age and Easy Apply.
+type, seniority, post age, Easy Apply and whether it is closed.
 
 Verified 2026-09-25 against 9 real pages (output/guest_probe/). NOT on the
 guest page, only when logged in: the On-site/Remote/Hybrid badge and
@@ -73,7 +73,7 @@ GUEST_HEADERS = {
     "accept-language": "en-US,en;q=0.9",
 }
 LINKEDIN_FIELDS = ("applicants", "applicants_text", "employment_type", "seniority_level",
-                   "days_old", "easy_apply", "likely_onsite", "li_location")
+                   "days_old", "easy_apply", "likely_onsite", "li_location", "closed")
 
 _LI_JOB_ID_RE = re.compile(r"/jobs/view/(?:[^/?]*-)?(\d{6,})")
 _APPLICANTS_RE = re.compile(r"(?:over\s+)?([\d,]+)\s+applicants?", re.I)
@@ -120,10 +120,17 @@ def is_likely_onsite(li_location: str | None, text: str) -> bool:
     return city_level and not _STRONG_REMOTE_RE.search(text)
 
 
+def is_closed_page(soup: BeautifulSoup) -> bool:
+    """The page's "No longer accepting applications" banner. Checked on
+    2026-10-12: closed pages show it (a .closed-job figure) and have no Apply
+    button. Postings with hundreds of applicants often close within a day."""
+    return soup.select_one(".closed-job") is not None
+
+
 def parse_guest_posting(html: str) -> dict:
     """Pull every field we use out of one LinkedIn guest job page."""
     soup = BeautifulSoup(html, "html.parser")
-    info: dict = {}
+    info: dict = {"closed": is_closed_page(soup)}
 
     desc_el = soup.select_one(".show-more-less-html__markup")
     info["description"] = markdown_converter(str(desc_el)) if desc_el else None
@@ -132,6 +139,10 @@ def parse_guest_posting(html: str) -> dict:
     caption = text_of(soup.select_one(".num-applicants__caption"))
     info["applicants_text"] = caption
     info["applicants"] = parse_applicants(caption)
+    if info["closed"]:
+        # A closed page resets the caption to "Be among the first 25
+        # applicants", which would read as 0 applicants.
+        info["applicants_text"] = info["applicants"] = None
     info["days_old"] = parse_days_old(text_of(soup.select_one(".posted-time-ago__text")))
 
     criteria = {}
@@ -215,6 +226,22 @@ def enrich(jobs: pd.DataFrame, proxies: list[str] | None = None) -> pd.DataFrame
         blob = f"{jobs.at[idx, 'title']} {desc} {jobs.at[idx, 'li_location'] or jobs.at[idx, 'location']}".lower()
         jobs.at[idx, "is_remote"] = any(k in blob for k in _REMOTE_KEYWORDS)
     return jobs
+
+
+def check_closed(job_urls: list[str]) -> dict[str, bool | None]:
+    """Re-fetch job pages and report which have closed since they were
+    scored: {url: True closed / False open / None page or id not found}."""
+    session = requests.Session()
+    session.headers.update(GUEST_HEADERS)
+    delay = getattr(config, "LINKEDIN_DETAIL_DELAY_SECONDS", 1.0)
+    result: dict[str, bool | None] = {}
+    for n, url in enumerate(job_urls):
+        if n:
+            time.sleep(delay + random.uniform(0, delay / 2))
+        m = _LI_JOB_ID_RE.search(url)
+        html = fetch_with_retry(session, GUEST_POSTING_URL.format(m.group(1))) if m else None
+        result[url] = is_closed_page(BeautifulSoup(html, "html.parser")) if html else None
+    return result
 
 
 def fetch(args) -> pd.DataFrame:

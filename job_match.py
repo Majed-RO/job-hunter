@@ -320,8 +320,13 @@ def prefilter(row) -> str | None:
 
     # Wide-term results (e.g. "Web Developer") are mostly other stacks; keep
     # only those that mention the candidate's stack. Narrow-term hits skip this.
+    # Outside LinkedIn, postings confirmed remote are scored anyway: only ~6 an
+    # Indeed run, and one named no framework but fit (Sensia Consulting,
+    # freelance remote AI web tool, 2026-10-14). The rest are dropped as
+    # "not confirmed remote" below.
     wide = row.get("wide_only")
-    if pd.notna(wide) and wide:
+    remote_confirmed = row.get("site") != "linkedin" and _flag(row.get("is_remote"))
+    if pd.notna(wide) and wide and not remote_confirmed:
         if not any(p.search(text) for p in _WIDE_KEYWORDS):
             return _WIDE_LABEL
 
@@ -363,8 +368,9 @@ def prefilter(row) -> str | None:
     age_days = row.get("days_old")
     if age_days is None or pd.isna(age_days):
         age_days = days_since(row.get("date_posted"))
-    if age_days is not None and age_days > config.MAX_AGE_DAYS:
-        return f"older than {config.MAX_AGE_DAYS} days"
+    max_age = max_age_days(row.get("site"))
+    if age_days is not None and age_days > max_age:
+        return f"older than {max_age} days"
 
     return None
 
@@ -390,6 +396,11 @@ def constraints_for(site, base: str) -> str:
     """base constraints plus this site's config.SITE_EXTRA_CONSTRAINTS entry, if any."""
     extra = getattr(config, "SITE_EXTRA_CONSTRAINTS", {}).get(str(site).lower())
     return f"{base.rstrip()}\n\n{extra.strip()}\n" if extra else base
+
+
+def max_age_days(site) -> int:
+    """MAX_AGE_DAYS for one site: its SITE_MAX_AGE_DAYS entry, else the global."""
+    return getattr(config, "SITE_MAX_AGE_DAYS", {}).get(str(site).lower(), config.MAX_AGE_DAYS)
 
 
 def min_scores(site) -> tuple[int, int]:

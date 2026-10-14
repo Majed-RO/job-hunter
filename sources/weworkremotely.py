@@ -11,8 +11,9 @@ no per-posting page fetch is needed: one request per category.
 - Locations for this site (config.SITE_LOCATIONS["weworkremotely"] or
   --locations) filter on the region: a posting is kept when its region
   contains one of them, case-insensitively. Empty list = keep every region.
-- Postings older than --hours / config.HOURS_OLD are dropped here, like
-  JobSpy's hours_old for LinkedIn/Indeed.
+- Postings older than --hours / config.HOURS_OLD (or this site's
+  config.SITE_MAX_AGE_DAYS, if longer) are dropped here, like JobSpy's
+  hours_old for LinkedIn/Indeed.
 """
 
 from __future__ import annotations
@@ -91,7 +92,9 @@ def fetch(args) -> pd.DataFrame:
         note(SITE, "no categories configured")
         return pd.DataFrame()
     regions = [r.lower() for r in args.site_locations.get(SITE, [])]
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=args.hours)
+    # SITE_MAX_AGE_DAYS widens this board's window past --hours / HOURS_OLD.
+    hours = max(args.hours, 24 * getattr(config, "SITE_MAX_AGE_DAYS", {}).get(SITE, 0))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     rows, seen = [], set()
     n_items = off_region = too_old = 0
@@ -117,7 +120,7 @@ def fetch(args) -> pd.DataFrame:
     if off_region:
         dropped.append(f"{off_region} outside {', '.join(args.site_locations.get(SITE, []))}")
     if too_old:
-        dropped.append(f"{too_old} older than {args.hours}h")
+        dropped.append(f"{too_old} older than {hours}h")
     summary = f"{len(rows)} kept of {n_items}" + (f" ({'; '.join(dropped)})" if dropped else "")
     print(f"[weworkremotely] {summary}")
     RUN_STATS.update(wwr_items=n_items)

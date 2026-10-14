@@ -54,9 +54,10 @@ LOCATIONS = [
 # (e.g. `--sites jobsps --locations ramallah-jobs`).
 # - linkedin / indeed: country or region names, as described for LOCATIONS.
 #   Indeed skips anything that isn't a country it supports (MENA, Worldwide).
-#   Not listed below, so they follow LOCATIONS, including a LOCATIONS set in
-#   config_local.py (a "linkedin": LOCATIONS entry here would keep this
-#   file's list and ignore that one).
+#   LinkedIn isn't listed below, so it follows LOCATIONS, including a
+#   LOCATIONS set in config_local.py (a "linkedin": LOCATIONS entry here would
+#   keep this file's list and ignore that one). Indeed is listed: LOCATIONS
+#   plus Arab markets that are too small to be worth a LinkedIn search.
 # - jobsps: jobs.ps location slugs, the last part of the location page URL
 #   (https://www.jobs.ps/locations/gaza-jobs -> "gaza-jobs"). Others:
 #   ramallah-jobs, nablus-jobs, hebron-jobs, jerusalem-jobs. "gaza-jobs" is
@@ -64,6 +65,11 @@ LOCATIONS = [
 #   only if their category is in JOBSPS_CATEGORIES. An empty list here reads
 #   the JOBSPS_CATEGORIES feeds directly instead, from all locations.
 SITE_LOCATIONS = {
+    # Indeed searches each country's own market (qa., sa., ae.indeed.com ...).
+    # On 2026-10-14, "developer" in the last 4 days had 2-3 remote-flagged
+    # postings each in Kuwait, Egypt and Morocco; Bahrain and Oman had none.
+    # Each country adds about 40s to the Indeed scrape.
+    "indeed": LOCATIONS + ["Kuwait", "Egypt", "Morocco"],
     "jobsps": ["gaza-jobs"],
     # We Work Remotely: kept when the posting's region contains one of these
     # (case-insensitive). Other regions seen: "North America Only",
@@ -141,10 +147,14 @@ JOBSPS_DETAIL_MAX_FAILURES = 5
 # "remote-front-end-programming-jobs", "remote-devops-sysadmin-jobs".
 # Each feed already has full descriptions: one request per category, no
 # page fetches. Region filter: SITE_LOCATIONS["weworkremotely"].
+# "remote-programming-jobs" is the parent category: mostly the same postings
+# as the three below, plus some filed only there (Proxify Node.js/Nest.js on
+# 2026-10-14). Duplicates are dropped by link.
 WWR_CATEGORIES = [
     "remote-full-stack-programming-jobs",
     "remote-back-end-programming-jobs",
-    "remote-front-end-programming-jobs"
+    "remote-front-end-programming-jobs",
+    "remote-programming-jobs",
 ]
 
 # Tuned 2026-09-24 for a "few times a week" run cadence (every 2-3 days):
@@ -166,6 +176,15 @@ RESULTS_PER_BOARD = 15  # results requested per board, per search term
 # that never actually fired since HOURS_OLD already filtered tighter upstream.
 MAX_AGE_DAYS = 5         # belt-and-suspenders on top of HOURS_OLD; catches rows
                          # with a stale date_posted that slip through
+# Per-site override of MAX_AGE_DAYS. For We Work Remotely it also widens the
+# feed's own age cutoff past HOURS_OLD. That board is small (a few new
+# programming postings a day, ~10 a run within 96h) and its postings stay open
+# for weeks, so a run looks back further; postings already scored come from
+# the cache at no cost. On 2026-10-14 its feeds held React/Node roles 4-29
+# days old that no run had scored (Proxify, Adventure Travel 365, Toggl).
+SITE_MAX_AGE_DAYS: dict[str, int] = {
+    "weworkremotely": 30,
+}
 # LinkedIn applicant counts, read from the public job page ("91 applicants",
 # "Over 200 applicants" -> 200). Indeed publishes none, so these never apply
 # there. The count is clicks on Apply, not finished applications, and the
@@ -286,8 +305,13 @@ MIN_SKILL_MATCH_PERCENT = 70   # same, applied to the LLM's "stack_fit" score
 # "apply" at overall 72 got stack_fit 0), so jobs.ps doesn't gate on it:
 # overall + verdict decide there.
 SITE_MIN_OVERALL_SCORE: dict[str, int] = {}
+# Indeed and We Work Remotely: 65. They bring few postings, so a lower bar
+# costs little reading, and their only apply/maybe near-misses were at 68
+# (Lemon.io Senior React Full-stack, Qlub Senior Software Engineer).
 SITE_MIN_SKILL_MATCH_PERCENT: dict[str, int] = {
     "jobsps": 0,
+    "indeed": 65,
+    "weworkremotely": 65,
 }
 # Which LLM verdicts may appear in shortlist.md (still subject to both scores
 # above). "skip" is never shortlisted, even if its score clears the bar.

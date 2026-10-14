@@ -16,6 +16,24 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**Indeed and We Work Remotely: more postings**
+- Indeed: each remote-only search now runs a date-filtered query as well as
+  the remote-filtered one and merges them. Since 1.0.0 only the
+  remote-filtered query ran, and most of its results were older than
+  `HOURS_OLD`: a run kept 2-7 Indeed postings (about 60 before); the first
+  run with both kept 105. The Indeed scrape still takes about 2 minutes.
+- We Work Remotely: postings up to 30 days old are read (new setting
+  `SITE_MAX_AGE_DAYS`), since this small board's postings stay open for
+  weeks. Postings already scored come from the cache. Also reads the parent
+  "remote-programming-jobs" feed.
+- `stack_fit` threshold for Indeed and We Work Remotely lowered from 70 to 65
+  (`SITE_MIN_SKILL_MATCH_PERCENT`).
+- Indeed also searches Kuwait, Egypt and Morocco (`SITE_LOCATIONS["indeed"]`).
+  LinkedIn doesn't, since those markets are small and LinkedIn searches are
+  slow.
+- Wide search terms: outside LinkedIn, a posting confirmed remote is scored
+  even if it names none of `WIDE_REQUIRED_KEYWORDS` (about 6 a run on Indeed).
+
 **LinkedIn: closed postings**
 - Postings whose LinkedIn page says "No longer accepting applications" are
   dropped before scoring, listed under "Dropped before scoring". Before, they

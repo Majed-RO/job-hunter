@@ -35,6 +35,8 @@ Run:
     python job_match.py --sites linkedin indeed
     python job_match.py --provider gemini     # score this run with Gemini instead
                                                # (needs GEMINI_API_KEY in .env either way)
+    python job_match.py --dry-run             # test run: outputs go to output/dry_run/,
+                                               # history.csv is left alone
 
 Outputs (paths set by config.OUTPUT_DIR / config.CACHE_PATH):
     output/jobs_scored_<site>.csv  full table for one site, best first, with a pass/fail column
@@ -69,7 +71,8 @@ from openai import OpenAI
 
 import config
 from sources import REGISTRY, load_source
-from sources.common import RUN_STATS, STANDARD_COLUMNS, days_since, title_blocked, utf8_console
+from sources.common import (RUN_STATS, STANDARD_COLUMNS, days_since, is_city_level, title_blocked,
+                            utf8_console)
 
 load_dotenv()  # reads .env in the current directory into os.environ, if present
 
@@ -97,6 +100,9 @@ PROVIDER, MODEL = resolve_provider_and_model()
 # (--remote/--no-remote, else config.SITE_REMOTE_ONLY, else config.IS_REMOTE):
 # prefilter() needs it but doesn't receive `args`.
 SITE_REMOTE_ONLY: dict[str, bool] = {}
+# --dry-run: main() points OUT_DIR at output/dry_run/ and append_history()
+# skips history.csv, so a test run leaves the real outputs alone.
+DRY_RUN = False
 
 
 def remote_only(site) -> bool:
@@ -115,6 +121,23 @@ _COMPILED_BLOCKERS = [
     (entry[0], re.compile(entry[1], re.I), re.compile(entry[2], re.I) if len(entry) > 2 else None)
     for entry in config.HARD_BLOCKERS
 ]
+# Location gate (see config.LOCATION_GATE_SITES): one combined regex per list.
+_LOC_GATE_SITES = {s.lower() for s in getattr(config, "LOCATION_GATE_SITES", [])}
+
+
+def _any_of(patterns: list[str]) -> re.Pattern | None:
+    return re.compile("|".join(f"(?:{p})" for p in patterns), re.I) if patterns else None
+
+
+_LOC_HOME = _any_of(getattr(config, "LOCATION_HOME", []))
+_LOC_ALLOWED = _any_of(getattr(config, "LOCATION_HOME", []) + getattr(config, "LOCATION_ALLOWED", []))
+_LOC_GLOBAL = _any_of(getattr(config, "LOCATION_GLOBAL_REMOTE", []))
+_LOC_REMOTE_STATEMENT = _any_of(getattr(config, "LOCATION_REMOTE_STATEMENT", []))
+_KEEP_LANGUAGES = _any_of(getattr(config, "LOCATION_GATE_KEEP_LANGUAGES", []))
+_REMOTE_WORDS = _any_of(getattr(config, "LOCATION_REMOTE_WORDS", []))
+NON_ENGLISH_LABEL = "not in English"
+LIKELY_ONSITE_LABEL = "likely on-site (city location, never says remote)"
+LOCATION_LABEL = "location outside allowlist"
 
 SYSTEM_PROMPT = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
 
@@ -158,6 +181,7 @@ Source: {site}
 Title: {title}
 Company: {company}
 Location: {location}
+Remote: {remote}
 Job type: {job_type}
 Posted: {date_posted}
 Compensation: {comp}
@@ -364,6 +388,10 @@ def prefilter(row) -> str | None:
         if pattern.search(text) and not (exception and exception.search(text)):
             return label
 
+    blocked = location_blocked(row, text)
+    if blocked:
+        return blocked
+
     # Age: LinkedIn's own "N days ago" when we have it, else JobSpy's date_posted.
     age_days = row.get("days_old")
     if age_days is None or pd.isna(age_days):
@@ -372,6 +400,50 @@ def prefilter(row) -> str | None:
     if age_days is not None and age_days > max_age:
         return f"older than {max_age} days"
 
+    return None
+
+
+_ENGLISH_WORDS = {"the", "and", "to", "of", "in", "you", "with", "for", "is", "are", "we", "our",
+                  "will", "your", "be", "as", "on", "or", "this", "that"}
+
+
+def english_share(description) -> float:
+    """Share of words in the text that are common English words: about 0.2
+    for English, under 0.04 for French/Spanish/Portuguese/Croatian."""
+    words = re.findall(r"[a-z']+", str(description or "").lower())
+    return sum(w in _ENGLISH_WORDS for w in words) / len(words) if words else 0.0
+
+
+def location_blocked(row, text: str) -> str | None:
+    """Label if a remote-only site's posting is tied to a place the candidate
+    can't work from (config.LOCATION_*), else None. Text saying the role is
+    open from anywhere, or a location in LOCATION_HOME, always passes."""
+    site = str(row.get("site")).lower()
+    if site not in _LOC_GATE_SITES or not remote_only(site):
+        return None
+    location = _str_or(row.get("location"), "").strip()
+    # Not in English (and not a kept language like Arabic): a local posting.
+    desc = row.get("description")
+    if (english_share(desc) < getattr(config, "LOCATION_GATE_MIN_ENGLISH_SHARE", 0)
+            and not (_KEEP_LANGUAGES and _KEEP_LANGUAGES.search(str(desc or "")))):
+        return NON_ENGLISH_LABEL
+    # Descriptions are markdown with escaped punctuation: "Remote\-first" (G2i).
+    text = text.replace("\\", "")
+    if (_LOC_GLOBAL and _LOC_GLOBAL.search(text)) or (_LOC_HOME and _LOC_HOME.search(location)):
+        return None
+    # City-level location and the text never says remote/WFH (is_remote is
+    # False, not unknown): LinkedIn's hidden badge is most likely On-site. Al
+    # Salah Holding (Dubai, 2026-10-15) was scored "maybe" on stack alone.
+    is_remote = row.get("is_remote")
+    if (_flag(row.get("likely_onsite")) and is_remote is not None and pd.notna(is_remote) and not is_remote
+            and not (_REMOTE_WORDS and _REMOTE_WORDS.search(text))):
+        return LIKELY_ONSITE_LABEL
+    if location and _LOC_ALLOWED and not _LOC_ALLOWED.search(location):
+        # A whole country plus a plain "fully remote" goes to the LLM: the text
+        # doesn't say whether that means remote within the country or anywhere.
+        if not is_city_level(location) and _LOC_REMOTE_STATEMENT and _LOC_REMOTE_STATEMENT.search(text):
+            return None
+        return f"{LOCATION_LABEL} ({location})"
     return None
 
 
@@ -436,11 +508,14 @@ def cache_key(resume: str, constraints: str, row) -> str:
     # are in it so editing them re-scores the postings they apply to.
     # A jobs.ps feed-only posting (page blocked) gets its own key, so once its
     # page can be fetched it's re-scored from the full description.
-    # The system prompt and reasoning effort change the answer too, so they're
-    # in it: editing either re-scores instead of serving the old scores.
-    blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{SYSTEM_PROMPT}|"
+    # The prompts and reasoning effort change the answer too, so they're in it:
+    # editing any of them re-scores instead of serving the old scores. So are
+    # location and the remote flag: a posting first scored with no location
+    # (see sources/linkedin.py) is re-scored once its location is known.
+    blob = (f"{resume}|{constraints}|{PROVIDER}|{MODEL}|{SYSTEM_PROMPT}|{USER_TEMPLATE}|"
             f"effort={getattr(config, 'MODEL_REASONING_EFFORT', None)}|{row.get('job_url')}|{row.get('title')}|"
-            f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}"
+            f"{row.get('company')}|onsite={_flag(row.get('likely_onsite'))}|"
+            f"location={_str_or(row.get('location'), '')}|remote={remote_text(row)}"
             + ("|feed_only" if _flag(row.get("feed_only")) else ""))
     return hashlib.sha1(blob.encode()).hexdigest()
 
@@ -455,6 +530,16 @@ def _flag(value) -> bool:
 
 def _str_or(value, fallback: str) -> str:
     return value if isinstance(value, str) and value.strip() else fallback
+
+
+def remote_text(row) -> str:
+    """The posting's is_remote flag for the prompt. LinkedIn: whether the
+    title, text or location says remote/WFH; Indeed: JobSpy's flag; We Work
+    Remotely: always; jobs.ps: the page's workplace type."""
+    flag = row.get("is_remote")
+    if flag is None or pd.isna(flag):
+        return "not known"
+    return "yes" if flag else "no remote signal in the posting"
 
 
 def workplace_check(row) -> str:
@@ -543,7 +628,8 @@ def score_one(client, resume: str, constraints: str, row) -> dict:
         site=row.get("site"),
         title=row.get("title"),
         company=row.get("company"),
-        location=row.get("location"),
+        location=_str_or(row.get("location"), "not stated"),
+        remote=remote_text(row),
         job_type=_str_or(row.get("employment_type"), _str_or(row.get("job_type"), "not stated")),
         date_posted=row.get("date_posted"),
         comp=comp_string(row),
@@ -700,9 +786,9 @@ def append_history(df: pd.DataFrame, cols: list[str]) -> Path | None:
     Adds a run_timestamp column so every run is distinguishable. Writes the
     header only if the file doesn't exist yet. This file grows without bound
     — nothing here prunes it. Returns the path written to, or None if
-    disabled via config.ENABLE_HISTORY_LOG.
+    disabled via config.ENABLE_HISTORY_LOG or on a --dry-run.
     """
-    if not config.ENABLE_HISTORY_LOG:
+    if not config.ENABLE_HISTORY_LOG or DRY_RUN:
         return None
     history_path = OUT_DIR / config.HISTORY_FILENAME
     run_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -873,7 +959,7 @@ def coverage_text(site: str) -> str | None:
 
 # Pre-filter labels that are nearly always right and very noisy: the dropped
 # section shows only a count for these instead of every posting.
-_COLLAPSED_DROP_LABELS = ("not confirmed remote", "older than", CLOSED_LABEL)
+_COLLAPSED_DROP_LABELS = ("not confirmed remote", "older than", CLOSED_LABEL, NON_ENGLISH_LABEL)
 
 
 def dropped_lines(df: pd.DataFrame) -> list[str]:
@@ -885,7 +971,7 @@ def dropped_lines(df: pd.DataFrame) -> list[str]:
     # Labels with a per-row detail in parentheses, e.g. "saturated Easy Apply
     # (Over 200 applicants)", are grouped without it. Fixed labels that have
     # their own parentheses, e.g. "clearance (TS/SCI)", are kept whole.
-    fixed = ({_WIDE_LABEL} | {e[0] for e in config.HARD_BLOCKERS}
+    fixed = ({_WIDE_LABEL, LIKELY_ONSITE_LABEL} | {e[0] for e in config.HARD_BLOCKERS}
              | {e[0] for e in getattr(config, "TITLE_BLOCKERS", [])})
     blockers = dropped["blockers"].astype(str)
     groups = blockers.where(blockers.isin(fixed),
@@ -1068,7 +1154,7 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
     """One jobs_scored_<site>.csv + shortlist_<site>.md per site this run
     scraped (so a single-site run leaves other sites' files alone), plus one
     append to the shared history.csv."""
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     df = df.copy()
     verdicts = [v.lower() for v in getattr(config, "SHORTLIST_VERDICTS", ["apply", "maybe"])]
@@ -1149,11 +1235,18 @@ def main() -> None:
     ap.add_argument("--provider", choices=["openrouter", "gemini"], default=None,
                     help="which API scores postings for this run only; overrides "
                          "LLM_PROVIDER in .env and config.LLM_PROVIDER")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="test run: write shortlists/CSVs to <OUTPUT_DIR>/dry_run/ and don't "
+                         "append to history.csv (the score cache is still used and updated)")
     args = ap.parse_args()
 
-    global PROVIDER, MODEL
+    global PROVIDER, MODEL, DRY_RUN, OUT_DIR
     if args.provider:
         PROVIDER, MODEL = resolve_provider_and_model(args.provider)
+    if args.dry_run:
+        DRY_RUN = True
+        OUT_DIR = OUT_DIR / "dry_run"
+        print(f"[config] dry run: outputs → {OUT_DIR}/, history.csv not touched")
     site_remote = getattr(config, "SITE_REMOTE_ONLY", {})
     SITE_REMOTE_ONLY.update({site: args.remote if args.remote is not None
                              else site_remote.get(site, config.IS_REMOTE)

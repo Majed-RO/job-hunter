@@ -49,6 +49,16 @@ def title_blocked(title: str) -> str | None:
     return None
 
 
+_CITY_WORDS_RE = re.compile(r"\b(?:area|metropolitan|metroplex|metro|greater)\b", re.I)
+
+
+def is_city_level(location: str | None) -> bool:
+    """"Dubai, United Arab Emirates", "San Francisco, CA", "Greater Seattle
+    Area" -> True; a bare country or region ("Brazil", "United States") -> False."""
+    loc = (location or "").strip()
+    return "," in loc or bool(_CITY_WORDS_RE.search(loc))
+
+
 def text_of(el) -> str | None:
     """Whitespace-normalized text of a BeautifulSoup element, or None."""
     return " ".join(el.get_text(" ", strip=True).split()) if el else None

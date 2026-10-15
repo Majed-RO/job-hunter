@@ -473,6 +473,9 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
    - are saturated: Easy Apply with "Over 200" applicants — only when `DROP_SATURATED_EASY_APPLY` is on, which it isn't by default (LinkedIn only; otherwise they're scored like other crowded postings and need a higher score instead, see `CROWDED_APPLICANTS`)
    - match a pattern in `HARD_BLOCKERS` — onsite/hybrid, W2-only, geo-locked
      remote, clearance, citizens-only, relocation required
+   - fail the location gate (LinkedIn): listed in a city and never say
+     "remote" (likely on-site), or tied to a place outside `LOCATION_ALLOWED`
+     (see §4)
    - are older than `MAX_AGE_DAYS`
 5. **Scores with an LLM.** Everything that survives gets sent to the model
    with your resume and constraints, and comes back with an `overall` score,
@@ -610,6 +613,11 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `TITLE_BLOCKERS` | Same shape as `HARD_BLOCKERS`, but matched against the **title only**, never the description — for words like "junior" or "graduate" that are common (and fine) inside a job's body text but a strong signal when they're in the title itself. |
 | `WORKPLACE_BLOCKER_LABELS` | The `HARD_BLOCKERS` labels that are about workplace (onsite/hybrid/return to office). Skipped for sites where `SITE_REMOTE_ONLY` is `False`; every other blocker still applies there. |
 | *(not a config variable)* `is_remote` backstop | When `IS_REMOTE`/`--remote` is on, any posting whose `is_remote` field is explicitly `False` is blocked as `"not confirmed remote"`. For LinkedIn the script computes it from title + description + location using JobSpy's keyword list ("remote", "work from home", "wfh"); for Indeed it's JobSpy's own value. Catches onsite postings that slipped past LinkedIn's/Indeed's own remote filter (seen in practice with LinkedIn's "Promoted by hirer" listings). A missing/unknown value (JobSpy couldn't tell either way) is never blocked on this alone. |
+| `LOCATION_GATE_SITES` | Sites the location gate applies to, when searched remote-only (default: LinkedIn, whose location comes from the job page). The gate drops, before scoring: **likely on-site** postings (city-level location, text never says remote, not in `LOCATION_HOME`), and remote postings whose location matches neither `LOCATION_HOME` nor `LOCATION_ALLOWED`. Dropped postings are listed under "Dropped before scoring" in the shortlist and kept in `history.csv`, with the location in the label. |
+| `LOCATION_HOME` / `LOCATION_ALLOWED` | Regexes matched against the posting's location. `LOCATION_HOME` is where you live (on-site is fine there); `LOCATION_ALLOWED` is where a remote posting may be listed (MENA/Gulf countries, "Worldwide", "EMEA" ...). A blank location always passes. |
+| `LOCATION_GLOBAL_REMOTE` | Regexes for title/description text saying the role is open from anywhere ("from anywhere", "anywhere in the world", "remote - worldwide", or your region named). A match keeps the posting whatever its location — LinkedIn lists worldwide-remote roles under a single country. |
+| `LOCATION_GATE_MIN_ENGLISH_SHARE` / `LOCATION_GATE_KEEP_LANGUAGES` | Postings not written in English are dropped as "not in English" (local jobs: French in Paris, Portuguese in São Paulo). A posting counts as not English when its description has a smaller share of common English words than `LOCATION_GATE_MIN_ENGLISH_SHARE` (English text is around 0.2, French/Spanish/Portuguese under 0.04; 0 turns this off). Descriptions matching a `LOCATION_GATE_KEEP_LANGUAGES` regex are kept anyway: Arabic script by default, with `LOCATION_REMOTE_WORDS` ("عن بعد") counting as saying remote for the likely-on-site rule. Shown as a count in "Dropped before scoring"; each one is in the CSV. |
+| `LOCATION_REMOTE_STATEMENT` | Regexes for "fully remote" / "remote-first" without a place. A posting listed under a whole country (e.g. "United States", not "Dallas, TX") with such text is kept and left to the LLM, since the text doesn't say whether it means remote within that country. |
 | `PREFILTER_DRY_RUN` | `True` scores every posting as normal but records what the pre-filter *would* have blocked in a new `prefilter_flag` column, so you can compare the regex verdict against the LLM's on the same run. Costs full price — use it for a run or two after editing `HARD_BLOCKERS`, then set back to `False`. |
 | `MIN_OVERALL_SCORE` | Postings below this `overall` score (0–100, from the LLM) are excluded from the shortlists. Still appear in the CSV. Currently 60, tuned for Haiku 5.5, which puts good matches at about 60–75. Scores aren't comparable across models, so re-check this after changing `MODEL_NAME`. |
 | `SHORTLIST_VERDICTS` | Which LLM verdicts can appear in the shortlists: `["apply", "maybe"]`. A "skip" is never shortlisted even if its score clears the bar. |
@@ -687,6 +695,7 @@ Every flag below overrides its matching `config.py` value for that run only
 | `--sites linkedin indeed jobsps` | `SOURCES` | `config.SOURCES` |
 | `--proxies user:pass@host:port ...` | (no config equivalent) | none |
 | `--provider openrouter\|gemini` | `LLM_PROVIDER` | `.env`'s `LLM_PROVIDER`, else `config.LLM_PROVIDER` |
+| `--dry-run` | `OUTPUT_DIR` / `ENABLE_HISTORY_LOG`: outputs go to `output/dry_run/`, `history.csv` is not appended (the score cache is still used) | off |
 
 Examples (venv still active from above):
 

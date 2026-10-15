@@ -16,6 +16,43 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**LinkedIn: location gate before scoring**
+- New free pre-filter for LinkedIn postings (`LOCATION_GATE_SITES`):
+  - "likely on-site": listed in a city and the text never says remote (Al
+    Salah Holding, Dubai, was shortlisted on stack alone);
+  - "location outside allowlist": tied to a place outside `LOCATION_HOME` /
+    `LOCATION_ALLOWED` (Kraken in Brazil, Block Labs in Croatia, Cohere in
+    New York).
+- Kept whatever the location: text saying the role is open from anywhere
+  (`LOCATION_GLOBAL_REMOTE`), and, for a location that is a whole country,
+  text saying fully remote / remote-first (`LOCATION_REMOTE_STATEMENT`),
+  which the LLM then judges.
+- Postings not written in English are dropped as "not in English": they are
+  local jobs (`LOCATION_GATE_MIN_ENGLISH_SHARE`). Arabic postings are kept
+  (`LOCATION_GATE_KEEP_LANGUAGES`).
+- Backtest on the 28 LinkedIn postings ever shortlisted: 14 kept (all 5
+  BairesDev "from anywhere", G2i, Torentify, Aethel, Deel EMEA, Gulf
+  postings), 13 dropped (Kraken, Block Labs, Cohere, Al Salah, Stefanini,
+  Newfold, ...), 1 page gone.
+- Dropped postings are listed under "Dropped before scoring" in each
+  shortlist and kept in `history.csv`, as with every pre-filter rule.
+
+**LinkedIn: the scorer sees each posting's real location**
+- LinkedIn postings now take their location from their own job page. JobSpy
+  replaced a country-only location ("Brazil", "Croatia") with the search's
+  country, which is blank for the Worldwide search: 19 of the 28 LinkedIn
+  postings ever shortlisted were scored without a location. The `location`
+  column in the CSVs and `history.csv` is fixed the same way.
+- The prompt also gets a `Remote:` line (the posting's is_remote flag).
+- The prompt template, location and remote flag are now part of the score
+  cache key, so the next run re-scores every posting once (about $0.001 each).
+
+**Test runs: `--dry-run`**
+- Writes the shortlists, CSVs and run summary to `output/dry_run/` instead of
+  `output/`, and doesn't append to `history.csv`, so a test run leaves the
+  real shortlist (and the shortlist recheck) alone. The score cache is still
+  used and updated.
+
 **Indeed and We Work Remotely: more postings**
 - Indeed: each remote-only search now runs a date-filtered query as well as
   the remote-filtered one and merges them. Since 1.0.0 only the

@@ -286,6 +286,77 @@ TITLE_BLOCKERS = [
      r"\b(intern|internship|junior|jr\.?|entry[- ]level|graduate|apprentice)\b"),
 ]
 
+# --- Location gate (pre-filter, same as the blockers above: dropped postings
+# are listed under "Dropped before scoring" in the shortlist and kept in
+# history.csv with the label in the blockers column) ---
+# Remote postings tied to a country the candidate can't work from. On
+# 2026-10-15, 4 of 6 shortlisted LinkedIn postings failed on location only:
+# Kraken (Brazil), Block Labs (Croatia), Cohere (New York) and Al Salah
+# (Dubai, on-site). LinkedIn's location is the only place most of them say so.
+# Sites the gate applies to (only when searched remote-only, see
+# SITE_REMOTE_ONLY). LinkedIn only for now: its location comes from the job
+# page. Indeed and We Work Remotely already search by country or region.
+LOCATION_GATE_SITES = ["linkedin"]
+# Regexes (case-insensitive) for the candidate's own location. On-site/hybrid
+# postings here are fine, so neither rule below drops them.
+LOCATION_HOME = [r"palestin", r"\bgaza\b", r"\bwest bank\b", r"\bramallah\b", r"\bnablus\b"]
+# Regexes for locations a remote posting may be tied to (besides LOCATION_HOME).
+# A posting whose location matches none of these, and whose text has no
+# LOCATION_GLOBAL_REMOTE statement, is dropped. A blank location is kept.
+LOCATION_ALLOWED = [
+    # regions and "no fixed location"
+    r"\bworldwide\b", r"\banywhere\b", r"\bglobal\b", r"^\s*remote\s*$",
+    r"\bmena\b", r"\bmiddle east\b", r"\bemea\b", r"\bgcc\b", r"\bgulf\b",
+    # Gulf
+    r"\bunited arab emirates\b", r"\buae\b", r"\bdubai\b", r"\babu dhabi\b", r"\bsharjah\b",
+    r"\bsaudi\b", r"\briyadh\b", r"\bjeddah\b", r"\bdammam\b", r"\bkhobar\b",
+    r"\bqatar\b", r"\bdoha\b", r"\bkuwait\b", r"\bbahrain\b", r"\bmanama\b",
+    r"\boman\b", r"\bmuscat\b",
+    # rest of MENA
+    r"\bjordan\b", r"\bamman\b", r"\begypt\b", r"\bcairo\b", r"\balexandria\b",
+    r"\blebanon\b", r"\bbeirut\b", r"\biraq\b", r"\bbaghdad\b", r"\berbil\b",
+    r"\bmorocco\b", r"\bcasablanca\b", r"\brabat\b", r"\btunisia\b", r"\btunis\b",
+    r"\balgeria\b", r"\balgiers\b", r"\blibya\b",
+]
+# Regexes for title/description text saying the role is open from anywhere.
+# A match keeps the posting whatever its location: LinkedIn lists BairesDev's
+# "100% remote work (from anywhere)" roles under e.g. "Cajamarca, Peru".
+# Bare "worldwide"/"global" are left out: company blurbs ("impact worldwide",
+# "a global team") would keep nearly everything.
+LOCATION_GLOBAL_REMOTE = [
+    r"\bfrom\s+anywhere\b", r"\banywhere\s+in\s+the\s+world\b",
+    r"\bremote,?\s*[-–(]?\s*(?:anywhere|global|worldwide)\b",
+    r"\bremote\b[^.\n]{0,30}\bworldwide\b", r"\bworldwide\b[^.\n]{0,30}\bremote\b",
+    r"\bglobal(?:ly)?\s+remote\b", r"\bfully\s+distributed\b",
+    r"\bfrom\s+any\s+(?:country|location)\b", r"\bany\s+time\s*zones?\b",
+    # the candidate's region named in the text: let the LLM judge it
+    r"\bmena\b", r"\bmiddle east\b", r"\bemea\b", r"palestin",
+]
+# Regexes for text stating the role is remote without naming where. A posting
+# listed under a whole country outside LOCATION_ALLOWED ("United States", not
+# "Dallas, TX") is kept when its text matches one, and the LLM judges it: in a
+# backtest on 2026-10-15, 5 of the 28 postings ever shortlisted were US-listed
+# "apply" verdicts saying only "fully remote" / "remote-first" (G2i, Torentify,
+# Aethel Defense), and G2i at least hires globally.
+# Postings not written in English are dropped as "not in English" (gate sites
+# only): they are local jobs (French in Paris, Portuguese in São Paulo), and
+# the English patterns above can't read them anyway. A posting counts as not
+# English when its description has fewer common English words ("the", "and",
+# "you", ...) than this share. On 2026-10-15's 180 gate-dropped postings,
+# non-English ones were at 0-0.035 and English ones at 0.12-0.32. 0 = off.
+LOCATION_GATE_MIN_ENGLISH_SHARE = 0.08
+# Regexes: a non-English description matching one is kept anyway (and judged
+# by the rules below). Arabic script: the candidate reads Arabic, and Arabic
+# postings are from the target region. [] = drop Arabic postings too.
+LOCATION_GATE_KEEP_LANGUAGES = [r"[؀-ۿ]"]
+# Regexes for "remote" in those kept languages. The "likely on-site" rule
+# otherwise only knows the English words (remote, work from home, WFH).
+LOCATION_REMOTE_WORDS = [r"عن\s*بُ?عد", r"من\s+المنزل"]
+LOCATION_REMOTE_STATEMENT = [
+    r"\bfully[- ]remote\b", r"\b100\s*%\s*remote\b", r"\bremote[- ]first\b",
+    r"\b(?:completely|entirely|permanently)\s+remote\b",
+]
+
 # Safety valve. True = score everything as before, but record what the
 # pre-filter WOULD have blocked in a prefilter_flag column, so you can compare
 # the regex verdict against the LLM's on the same run. Costs full price; use it

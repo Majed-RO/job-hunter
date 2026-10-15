@@ -29,7 +29,8 @@ from jobspy.util import markdown_converter  # same HTML->markdown JobSpy used fo
 
 import config
 from sources import _jobspy
-from sources.common import RUN_STATS, USER_AGENT, fetch_with_retry, note, text_of, title_blocked
+from sources.common import (RUN_STATS, USER_AGENT, fetch_with_retry, is_city_level, note,
+                            text_of, title_blocked)
 
 SITE = "linkedin"
 
@@ -92,7 +93,6 @@ _STRONG_REMOTE_RE = re.compile(
     r"|\bremote[- ]first\b|\bwork\s+from\s+anywhere\b|\bremote,?\s+anywhere\b"
     r"|\bfully\s+distributed\b|\banywhere\s+in\s+the\s+world\b"
     r"|\bremote\s*\(\s*(?:global|worldwide|anywhere)", re.I)
-_CITY_WORDS_RE = re.compile(r"\b(?:area|metropolitan|metroplex|metro|greater)\b", re.I)
 
 
 def parse_applicants(caption: str | None) -> int | None:
@@ -116,8 +116,7 @@ def is_likely_onsite(li_location: str | None, text: str) -> bool:
     loc = (li_location or "").strip()
     if not loc or "remote" in loc.lower():
         return False
-    city_level = "," in loc or bool(_CITY_WORDS_RE.search(loc))
-    return city_level and not _STRONG_REMOTE_RE.search(text)
+    return is_city_level(loc) and not _STRONG_REMOTE_RE.search(text)
 
 
 def is_closed_page(soup: BeautifulSoup) -> bool:
@@ -204,6 +203,13 @@ def enrich(jobs: pd.DataFrame, proxies: list[str] | None = None) -> pd.DataFrame
             info = parse_guest_posting(html)
             for key, value in info.items():
                 jobs.at[idx, key] = value
+            # The page's location replaces JobSpy's: JobSpy swaps a country-only
+            # location ("Brazil") for the search's country, which prints as
+            # nothing for a Worldwide search and as e.g. "United Arab Emirates"
+            # for a UAE search. 19 of the first 28 shortlisted postings reached
+            # the scorer with no location (Kraken, Block Labs, 2026-10-15).
+            if info.get("li_location"):
+                jobs.at[idx, "location"] = info["li_location"]
             text = f"{row.get('title') or ''} {info.get('description') or ''}"
             jobs.at[idx, "likely_onsite"] = is_likely_onsite(info.get("li_location"), text)
         if n % 20 == 0 or n == len(todo):

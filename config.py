@@ -296,6 +296,8 @@ TITLE_BLOCKERS = [
 # Sites the gate applies to (only when searched remote-only, see
 # SITE_REMOTE_ONLY). LinkedIn only for now: its location comes from the job
 # page. Indeed and We Work Remotely already search by country or region.
+# Don't add Indeed for the "remote within one country" rule below: there
+# "Remote, US" can be open remote (Holox, 2026-10-19).
 LOCATION_GATE_SITES = ["linkedin"]
 # Regexes (case-insensitive) for the candidate's own location. On-site/hybrid
 # postings here are fine, so neither rule below drops them.
@@ -332,12 +334,19 @@ LOCATION_GLOBAL_REMOTE = [
     # the candidate's region named in the text: let the LLM judge it
     r"\bmena\b", r"\bmiddle east\b", r"\bemea\b", r"palestin",
 ]
-# Regexes for text stating the role is remote without naming where. A posting
-# listed under a whole country outside LOCATION_ALLOWED ("United States", not
-# "Dallas, TX") is kept when its text matches one, and the LLM judges it: in a
-# backtest on 2026-10-15, 5 of the 28 postings ever shortlisted were US-listed
-# "apply" verdicts saying only "fully remote" / "remote-first" (G2i, Torentify,
-# Aethel Defense), and G2i at least hires globally.
+# A posting listed under a whole country outside LOCATION_ALLOWED ("United
+# States", not "Dallas, TX") is dropped as "remote within one country": on
+# LinkedIn that pairing means remote within that country. Unless its text
+# matches LOCATION_GLOBAL_REMOTE (kept as usual) or one of these regexes,
+# for "remote" without naming where: then it's scored, and if it clears the
+# thresholds without the LLM finding it open to the candidate, it's listed
+# under "Remote, but listed in one country" instead of the shortlist. Topstep
+# (United States, "fully remote", 2026-10-18) asked for US work authorization
+# on the apply page; G2i (United States, "remote-first") hires globally.
+LOCATION_REMOTE_STATEMENT = [
+    r"\bfully[- ]remote\b", r"\b100\s*%\s*remote\b", r"\bremote[- ]first\b",
+    r"\b(?:completely|entirely|permanently)\s+remote\b",
+]
 # Postings not written in English are dropped as "not in English" (gate sites
 # only): they are local jobs (French in Paris, Portuguese in São Paulo), and
 # the English patterns above can't read them anyway. A posting counts as not
@@ -352,10 +361,6 @@ LOCATION_GATE_KEEP_LANGUAGES = [r"[؀-ۿ]"]
 # Regexes for "remote" in those kept languages. The "likely on-site" rule
 # otherwise only knows the English words (remote, work from home, WFH).
 LOCATION_REMOTE_WORDS = [r"عن\s*بُ?عد", r"من\s+المنزل"]
-LOCATION_REMOTE_STATEMENT = [
-    r"\bfully[- ]remote\b", r"\b100\s*%\s*remote\b", r"\bremote[- ]first\b",
-    r"\b(?:completely|entirely|permanently)\s+remote\b",
-]
 
 # Safety valve. True = score everything as before, but record what the
 # pre-filter WOULD have blocked in a prefilter_flag column, so you can compare

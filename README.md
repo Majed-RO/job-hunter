@@ -478,13 +478,18 @@ LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<si
      (see §4)
    - are older than `MAX_AGE_DAYS`
 5. **Scores with an LLM.** Everything that survives gets sent to the model
-   with your resume and constraints, and comes back with an `overall` score,
-   four sub-scores, a verdict, and named matches/gaps/blockers. Postings
-   flagged `likely_onsite` carry a warning in the prompt; the model then caps
-   `logistics_fit` at 50 and the verdict at `maybe` unless the text clearly
-   says fully remote.
-6. **Caches.** Every score is cached by a hash of `(resume text, provider,
-   model, job URL, title, company, likely_onsite)`. Re-running the script only pays for postings not
+   with your resume and constraints. The model first decides **eligibility**:
+   `pass` (the posting is open to someone where you live), `fail` (it rules
+   you out: on-site elsewhere, "based in"/"remote within" another country,
+   work authorization, W2 ...) or `unclear` (remote, but it doesn't say where
+   you may live), with a one-line `eligibility_reason`. Then it gives an
+   `overall` score, four sub-scores, a verdict, and named
+   matches/gaps/blockers. A `fail` is scored 0 and skipped, so it's never
+   shortlisted; an `unclear` one can be, marked **Verify location on the
+   apply page**. Postings flagged `likely_onsite` carry a warning in the
+   prompt, which makes eligibility at best `unclear`.
+6. **Caches.** Every score is cached by a hash of `(resume text, constraints,
+   provider, model, prompts, job URL, title, company, location, likely_onsite)`. Re-running the script only pays for postings not
    already in the cache — editing your resume invalidates it on purpose,
    since old scores no longer apply to new resume text.
 7. **Filters and sorts.** Sorts everything by `overall` score, descending,
@@ -613,11 +618,11 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `TITLE_BLOCKERS` | Same shape as `HARD_BLOCKERS`, but matched against the **title only**, never the description — for words like "junior" or "graduate" that are common (and fine) inside a job's body text but a strong signal when they're in the title itself. |
 | `WORKPLACE_BLOCKER_LABELS` | The `HARD_BLOCKERS` labels that are about workplace (onsite/hybrid/return to office). Skipped for sites where `SITE_REMOTE_ONLY` is `False`; every other blocker still applies there. |
 | *(not a config variable)* `is_remote` backstop | When `IS_REMOTE`/`--remote` is on, any posting whose `is_remote` field is explicitly `False` is blocked as `"not confirmed remote"`. For LinkedIn the script computes it from title + description + location using JobSpy's keyword list ("remote", "work from home", "wfh"); for Indeed it's JobSpy's own value. Catches onsite postings that slipped past LinkedIn's/Indeed's own remote filter (seen in practice with LinkedIn's "Promoted by hirer" listings). A missing/unknown value (JobSpy couldn't tell either way) is never blocked on this alone. |
-| `LOCATION_GATE_SITES` | Sites the location gate applies to, when searched remote-only (default: LinkedIn, whose location comes from the job page). The gate drops, before scoring: **likely on-site** postings (city-level location, text never says remote, not in `LOCATION_HOME`), and remote postings whose location matches neither `LOCATION_HOME` nor `LOCATION_ALLOWED`. Dropped postings are listed under "Dropped before scoring" in the shortlist and kept in `history.csv`, with the location in the label. |
+| `LOCATION_GATE_SITES` | Sites the location gate applies to, when searched remote-only (default: LinkedIn, whose location comes from the job page). The gate drops, before scoring: **likely on-site** postings (city-level location, text never says remote, not in `LOCATION_HOME`), and remote postings whose location matches neither `LOCATION_HOME` nor `LOCATION_ALLOWED` (a whole country outside them, e.g. "United States", is labelled **remote within one country**: on LinkedIn, Remote plus a country means remote within it). Dropped postings are listed under "Dropped before scoring" in the shortlist and kept in `history.csv`, with the location in the label. |
 | `LOCATION_HOME` / `LOCATION_ALLOWED` | Regexes matched against the posting's location. `LOCATION_HOME` is where you live (on-site is fine there); `LOCATION_ALLOWED` is where a remote posting may be listed (MENA/Gulf countries, "Worldwide", "EMEA" ...). A blank location always passes. |
 | `LOCATION_GLOBAL_REMOTE` | Regexes for title/description text saying the role is open from anywhere ("from anywhere", "anywhere in the world", "remote - worldwide", or your region named). A match keeps the posting whatever its location — LinkedIn lists worldwide-remote roles under a single country. |
 | `LOCATION_GATE_MIN_ENGLISH_SHARE` / `LOCATION_GATE_KEEP_LANGUAGES` | Postings not written in English are dropped as "not in English" (local jobs: French in Paris, Portuguese in São Paulo). A posting counts as not English when its description has a smaller share of common English words than `LOCATION_GATE_MIN_ENGLISH_SHARE` (English text is around 0.2, French/Spanish/Portuguese under 0.04; 0 turns this off). Descriptions matching a `LOCATION_GATE_KEEP_LANGUAGES` regex are kept anyway: Arabic script by default, with `LOCATION_REMOTE_WORDS` ("عن بعد") counting as saying remote for the likely-on-site rule. Shown as a count in "Dropped before scoring"; each one is in the CSV. |
-| `LOCATION_REMOTE_STATEMENT` | Regexes for "fully remote" / "remote-first" without a place. A posting listed under a whole country (e.g. "United States", not "Dallas, TX") with such text is kept and left to the LLM, since the text doesn't say whether it means remote within that country. |
+| `LOCATION_REMOTE_STATEMENT` | Regexes for "fully remote" / "remote-first" without a place. A posting listed under a whole country (e.g. "United States", not "Dallas, TX") with such text isn't dropped: it's scored, and if it clears the thresholds (and the LLM didn't find it open to you) it goes under **Remote, but listed in one country** in the shortlist file, not the shortlist itself. Usually that means remote within that country, but some companies (G2i) hire globally without saying so. Counted in the run summary's "One country" column and the `country_remote` CSV column. |
 | `PREFILTER_DRY_RUN` | `True` scores every posting as normal but records what the pre-filter *would* have blocked in a new `prefilter_flag` column, so you can compare the regex verdict against the LLM's on the same run. Costs full price — use it for a run or two after editing `HARD_BLOCKERS`, then set back to `False`. |
 | `MIN_OVERALL_SCORE` | Postings below this `overall` score (0–100, from the LLM) are excluded from the shortlists. Still appear in the CSV. Currently 60, tuned for Haiku 5.5, which puts good matches at about 60–75. Scores aren't comparable across models, so re-check this after changing `MODEL_NAME`. |
 | `SHORTLIST_VERDICTS` | Which LLM verdicts can appear in the shortlists: `["apply", "maybe"]`. A "skip" is never shortlisted even if its score clears the bar. |

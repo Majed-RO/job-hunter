@@ -138,11 +138,14 @@ _REMOTE_WORDS = _any_of(getattr(config, "LOCATION_REMOTE_WORDS", []))
 NON_ENGLISH_LABEL = "not in English"
 LIKELY_ONSITE_LABEL = "likely on-site (city location, never says remote)"
 LOCATION_LABEL = "location outside allowlist"
+COUNTRY_REMOTE_LABEL = "remote within one country"
 
 SYSTEM_PROMPT = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
 
 Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
 {
+  "eligibility": "pass" | "fail" | "unclear",
+  "eligibility_reason": "one sentence, max 20 words: what in the posting decides it",
   "overall": int 0-100,
   "stack_fit": int 0-100,
   "seniority_fit": int 0-100,
@@ -155,18 +158,37 @@ Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys
   "blockers": ["hard disqualifiers: citizenship/clearance/visa sponsorship-required/timezone/onsite. Empty list if none."]
 }
 
-logistics_fit scores location, work authorization, timezone overlap and contract type
-against the candidate's constraints. If the posting hard-blocks the candidate,
-logistics_fit is below 20 and overall is capped at 30.
+Decide eligibility FIRST, before judging fit: can this candidate be hired for this role
+from where they live, under their constraints? Use the Location, Remote and Workplace
+check lines as well as the description.
+- "fail": something rules the candidate out: on-site or hybrid work outside the
+  candidate's home area; a requirement to live in, be located in, or be authorized to
+  work in a country or region the candidate isn't in (e.g. "remote within the US",
+  "must reside in Canada", "EU work permit"); visa sponsorship needed; US payroll/W2
+  only; citizenship or clearance. Also fail when the text itself ties the role to the
+  listed country: "based in <country>", "remote within <country>", a local employment
+  contract, or benefits/pay ranges stated for that country only. Also fail when the
+  role is listed in a country outside the candidate's region and the text never says it
+  is remote.
+- "pass": the posting shows it is open to someone where the candidate lives: remote from
+  anywhere/worldwide, a region that includes the candidate's location (e.g. MENA,
+  Middle East, EMEA without an EU-only condition, also when named in the title), or the
+  candidate's own country.
+- "unclear": the text says remote, but not where candidates may live, and nothing above
+  rules the candidate out. A listed country, a USD salary, a background check or the
+  lack of a statement about other countries is NOT a reason to fail: that is "unclear".
+  Wording like "Remote/Hybrid" or "remote or on-site"
+  does not show the role is fully remote; if the Workplace check line warns it may be
+  on-site, eligibility is at best "unclear".
+eligibility_reason quotes or names what decided it ("Location: Brazil, no remote
+statement", "'100% remote from anywhere'").
 
-If the posting's "Workplace check" line warns it may be on-site or hybrid, treat the
-workplace as unconfirmed: logistics_fit at most 50 and verdict at most "maybe", unless
-the description explicitly says the role is fully remote for people outside that
-location. Wording like "Remote/Hybrid" or "remote or on-site" does NOT confirm it.
-An unconfirmed workplace alone is not a reason to skip: if the posting is otherwise a
-good fit, the verdict is "maybe" so the candidate can check the workplace badge. Skip
-only for what the text actually states (a required location, on-site days, timezone,
-work authorization, ...) or a poor fit."""
+If eligibility is "fail": verdict "skip", logistics_fit below 20, overall at most 30.
+If "unclear": score fit normally; the missing location statement alone is not a reason
+to mark the posting down or skip it, since the candidate will check the apply page.
+
+logistics_fit scores location, work authorization, timezone overlap and contract type
+against the candidate's constraints."""
 
 USER_TEMPLATE = """<candidate_resume>
 {resume}
@@ -439,12 +461,33 @@ def location_blocked(row, text: str) -> str | None:
             and not (_REMOTE_WORDS and _REMOTE_WORDS.search(text))):
         return LIKELY_ONSITE_LABEL
     if location and _LOC_ALLOWED and not _LOC_ALLOWED.search(location):
-        # A whole country plus a plain "fully remote" goes to the LLM: the text
-        # doesn't say whether that means remote within the country or anywhere.
-        if not is_city_level(location) and _LOC_REMOTE_STATEMENT and _LOC_REMOTE_STATEMENT.search(text):
-            return None
+        # A whole country ("United States", not "Dallas, TX") on a remote
+        # LinkedIn posting means remote within that country; roles open more
+        # widely are listed under a region or "Worldwide". Text saying "fully
+        # remote" goes to the LLM anyway and is listed apart (is_country_remote).
+        if not is_city_level(location):
+            return None if is_country_remote(row) else f"{COUNTRY_REMOTE_LABEL} ({location})"
         return f"{LOCATION_LABEL} ({location})"
     return None
+
+
+def is_country_remote(row) -> bool:
+    """A gate site's posting listed under a whole country outside
+    LOCATION_HOME/LOCATION_ALLOWED ("United States", not "Dallas, TX") whose
+    text says "fully remote" / "remote-first" but not from where. On LinkedIn
+    that mostly means remote within that country (Topstep, 2026-10-18, asked
+    for US work authorization), but some hire globally without saying so
+    (G2i). These are scored, so the LLM fails the ones whose text ties them to
+    the country, and the rest are listed apart from the shortlist."""
+    site = str(row.get("site")).lower()
+    if site not in _LOC_GATE_SITES or not remote_only(site):
+        return False
+    location = _str_or(row.get("location"), "").strip()
+    if not location or is_city_level(location) or (_LOC_ALLOWED and _LOC_ALLOWED.search(location)):
+        return False
+    text = f"{row.get('title') or ''} {_str_or(row.get('description'), '')}".replace("\\", "")
+    return bool(_LOC_REMOTE_STATEMENT and _LOC_REMOTE_STATEMENT.search(text)
+                and not (_LOC_GLOBAL and _LOC_GLOBAL.search(text)))
 
 
 # --------------------------------------------------------------------------- #
@@ -651,6 +694,24 @@ def score_one(client, resume: str, constraints: str, row) -> dict:
 _RETRY_AFTER_RE = re.compile(r"retry in ([\d.]+)s", re.I)
 
 
+ELIGIBILITY_VALUES = ("pass", "fail", "unclear")
+
+
+def apply_eligibility(result: dict) -> dict:
+    """The LLM's eligibility verdict, normalized (anything else counts as
+    "unclear"). A "fail" scores 0 and is skipped whatever fit scores the LLM
+    gave, so it is never shortlisted. Applied on read, not stored in the
+    cache, so changing this rule doesn't need a re-score."""
+    if "eligibility" not in result:  # pre-filtered, or a failed call
+        return result
+    result = dict(result)
+    value = str(result.get("eligibility") or "").strip().lower()
+    result["eligibility"] = value if value in ELIGIBILITY_VALUES else "unclear"
+    if result["eligibility"] == "fail":
+        result.update(overall=0, verdict="skip")
+    return result
+
+
 def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
     """How long to wait before the next attempt.
 
@@ -760,6 +821,8 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
                 if n % 10 == 0 or n == len(todo):
                     print(f"  scored {n}/{len(todo)}", flush=True)
         cache_save(cache)
+
+    results = {idx: apply_eligibility(result) for idx, result in results.items()}
 
     if getattr(config, "DUMP_SKIPPED_DESCRIPTIONS", False):
         _dump_skipped_descriptions(jobs, results)
@@ -888,6 +951,7 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
     unique = s.get("unique_by_source", {}).get(site, len(df))
     prefiltered = scoring.get("prefiltered", 0)
     passed = int(df["passes_threshold"].sum()) if len(df) else 0
+    country_remote = int((df["passes_threshold"] & df["country_remote"]).sum()) if len(df) else 0
     return {
         "scraped": s.get("rows_by_source", {}).get(site, 0),
         "unique": unique,
@@ -899,10 +963,12 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
         "apply": by_verdict.get("apply", 0),
         "maybe": by_verdict.get("maybe", 0),
         "skip": by_verdict.get("skip", 0) - prefiltered,  # the LLM's skips; pre-filtered counted above
+        "ineligible": int((df["eligibility"] == "fail").sum()) if "eligibility" in df else 0,
         "error": by_verdict.get("error", 0),
         "verdict_ok": sum(by_verdict.get(v, 0) for v in verdicts),
         "passed": passed,
-        "shortlisted": min(passed, top),
+        "shortlisted": min(passed - country_remote, top),
+        "country_remote": min(country_remote, top),
     }
 
 
@@ -929,14 +995,19 @@ def site_paragraph(site: str, f: dict, top: int, verdicts: list[str]) -> str:
         text += f"All {f['to_score']} went to scoring "
     text += (f"({f['from_cache']} from cache, {_plural(f['llm_calls'], 'new LLM call')}). "
              f"The LLM rated {f['apply']} apply, {f['maybe']} maybe and {f['skip']} skip"
+             + (f" ({f['ineligible']} of the skips failed the eligibility check)" if f["ineligible"] else "")
              + (f", and {f['error']} failed to score" if f["error"] else "") + ". ")
     if not f["verdict_ok"]:
         text += f"With no {'/'.join(verdicts)} verdicts, nothing was shortlisted."
     else:
         text += (f"Of the {f['verdict_ok']} rated {'/'.join(verdicts)}, {f['passed']} "
                  f"cleared the score thresholds")
-        text += (f", and the top {top} of those were shortlisted." if f["passed"] > top
-                 else f", so {f['shortlisted']} {'is' if f['shortlisted'] == 1 else 'are'} shortlisted.")
+        if f["country_remote"]:
+            text += (f"; {f['country_remote']} of those are remote but listed in one country, "
+                     f"so they're listed apart, and {f['shortlisted']} shortlisted.")
+        else:
+            text += (f", and the top {top} of those were shortlisted." if f["passed"] > top
+                     else f", so {f['shortlisted']} {'is' if f['shortlisted'] == 1 else 'are'} shortlisted.")
     return text
 
 
@@ -992,6 +1063,27 @@ def dropped_lines(df: pd.DataFrame) -> list[str]:
     return lines + [""]
 
 
+def country_remote_lines(df: pd.DataFrame, top: int) -> list[str]:
+    """Markdown list of postings that cleared every threshold but are remote
+    and listed under one country with nothing saying they hire elsewhere (see
+    is_country_remote): kept out of the shortlist, listed here to check."""
+    rows = df[df["passes_threshold"] & df["country_remote"]].head(top)
+    if not len(rows):
+        return []
+    lines = ["---", "", f"## Remote, but listed in one country ({len(rows)})", "",
+             "Cleared the thresholds, but the posting is listed under a single country and only "
+             "says \"fully remote\" or similar. On LinkedIn that usually means remote within that "
+             "country (US work authorization on the apply page); some companies hire globally "
+             "anyway. Check the apply page or the company's careers page before applying.", ""]
+    for _, r in rows.iterrows():
+        lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
+                     f"{_str_or(r.get('company'), 'company not listed')} · {shortlist_meta(r)}")
+        lines.append(f"  - {r['reason']}")
+        if r.get("eligibility_reason"):
+            lines.append(f"  - Eligibility {r.get('eligibility')}: {_str_or(r.get('eligibility_reason'), '')}")
+    return lines + [""]
+
+
 def near_miss_lines(df: pd.DataFrame, site: str, verdicts: list[str]) -> list[str]:
     """Markdown list of one site's postings the LLM rated apply/maybe that
     missed a score threshold, with which one, so a good match held back by a
@@ -1013,7 +1105,9 @@ def near_miss_lines(df: pd.DataFrame, site: str, verdicts: list[str]) -> list[st
             why.append(f"stack_fit {r['stack_fit']} < {min_stack}")
         lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
                      f"{_str_or(r.get('company'), 'company not listed')} · {'; '.join(why)}"
-                     + (" · check workplace badge" if _flag(r.get("likely_onsite")) else ""))
+                     + (" · check workplace badge" if _flag(r.get("likely_onsite")) else "")
+                     + (" · remote, listed in one country" if _flag(r.get("country_remote"))
+                        else " · verify location on the apply page" if r.get("eligibility") == "unclear" else ""))
         lines.append(f"  - {r['reason']}")
     return lines + [""]
 
@@ -1037,12 +1131,15 @@ def run_metrics_lines(site: str, f: dict, top: int, verdicts: list[str]) -> list
              f"| LLM scoring | {_fmt_time('scoring')} (all boards) | {f['to_score']} | {f['to_score']} | "
              f"{f['from_cache']} from cache, {f['llm_calls']} LLM calls · "
              f"{f['apply']} apply, {f['maybe']} maybe, {f['skip']} skip"
+             + (f" ({f['ineligible']} ineligible)" if f["ineligible"] else "")
              + (f", {f['error']} failed" if f["error"] else "") + " |",
              f"| verdict filter | — | {f['to_score']} | {f['verdict_ok']} | "
              f"keeps {'/'.join(verdicts)} only |",
              f"| score thresholds | — | {f['verdict_ok']} | {f['passed']} | "
              f"{thresholds_text(site)} |",
-             f"| shortlist | — | {f['passed']} | {f['shortlisted']} | top {top} kept |",
+             f"| shortlist | — | {f['passed']} | {f['shortlisted']} | top {top} kept"
+             + (f"; {f['country_remote']} remote in one country listed apart" if f["country_remote"] else "")
+             + " |",
              f"| **total** | **{_total_time()}** (whole run) | **{f['scraped']}** | "
              f"**{f['shortlisted']}** | {f['scraped']} scraped → {f['shortlisted']} shortlisted |"]
     return lines + [""]
@@ -1066,7 +1163,9 @@ def run_summary_paragraph(funnels: dict[str, dict], verdicts: list[str]) -> str:
         by_board = ", ".join(f"{site} {f['shortlisted']}" for site, f in funnels.items()
                              if f["shortlisted"])
         text += (f"{t['passed']} cleared the score thresholds and {t['shortlisted']} "
-                 f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted ({by_board}).")
+                 f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted ({by_board})"
+                 + (f"; {t['country_remote']} remote but listed in one country are listed apart."
+                    if t.get("country_remote") else "."))
     else:
         text += "None cleared the score thresholds, so every shortlist is empty."
     return text
@@ -1078,9 +1177,11 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
     s = RUN_STATS
     cols = [("scraped", "Scraped"), ("unique", "Unique"), ("prefiltered", "Pre-filtered"),
             ("to_score", "Scored"), ("from_cache", "From cache"), ("llm_calls", "LLM calls"),
-            ("apply", "Apply"), ("maybe", "Maybe"), ("skip", "Skip"), ("error", "Failed"),
+            ("apply", "Apply"), ("maybe", "Maybe"), ("skip", "Skip"), ("ineligible", "Ineligible"),
+            ("error", "Failed"),
             ("verdict_ok", "/".join(v.capitalize() for v in verdicts)),
-            ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted")]
+            ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted"),
+            ("country_remote", "One country")]
     lines = ["# Run summary", "", _run_header(), "",
              run_summary_paragraph(funnels, verdicts), "",
              f"Boards: {', '.join(funnels) or '(none)'} · thresholds: "
@@ -1117,7 +1218,7 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
 def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
                     funnel: dict) -> list[str]:
     """Markdown shortlist for one site's rows (already sorted best first)."""
-    shortlist = df[df["passes_threshold"]].head(top)
+    shortlist = df[df["passes_threshold"] & ~df["country_remote"]].head(top)
     by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
     lines = [f"# {site} shortlist — top {len(shortlist)} of {len(df)} postings "
              f"({thresholds_text(site)}; "
@@ -1136,6 +1237,11 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if _flag(r.get("likely_onsite")):
             lines.append("**Check workplace badge** — city-level location and no explicit "
                          "fully-remote statement; may be On-site/Hybrid.")
+        if r.get("eligibility") == "unclear":
+            lines.append(f"**Verify location on the apply page** — "
+                         f"{_str_or(r.get('eligibility_reason'), 'the posting does not say where candidates may live')}")
+        elif r.get("eligibility") == "pass":
+            lines.append(f"Eligibility: pass — {_str_or(r.get('eligibility_reason'), '')}")
         lines.append(f"**{str(r['verdict']).upper()}** — {r['reason']}")
         if r["blockers"]:
             lines.append(f"- Blockers: {r['blockers']}")
@@ -1144,6 +1250,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
+    lines += country_remote_lines(df, top)
     lines += near_miss_lines(df, site, verdicts)
     lines += dropped_lines(df)
     lines += run_metrics_lines(site, funnel, top, verdicts)
@@ -1169,12 +1276,19 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
         (df["overall"] >= min_overall)
         & (df["stack_fit"] >= min_stack)
         & df["verdict"].astype(str).str.lower().isin(verdicts)
+        & (df["eligibility"] != "fail" if "eligibility" in df else True)
     )
+    # Remote, one country, no word on hiring elsewhere: listed apart unless
+    # the LLM found the posting open to the candidate ("pass").
+    df["country_remote"] = (df.apply(is_country_remote, axis=1).astype(bool) if len(df)
+                            else pd.Series(dtype=bool))
+    if "eligibility" in df:
+        df["country_remote"] &= df["eligibility"] != "pass"
 
-    cols = ["overall", "passes_threshold", "verdict", "title", "company", "site",
+    cols = ["overall", "passes_threshold", "verdict", "eligibility", "eligibility_reason", "title", "company", "site",
             "location", "search_location", "employment_type", "seniority_level", "date_posted",
             "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
-            "likely_onsite", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "likely_onsite", "country_remote", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
             "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
     cols = [c for c in cols if c in df.columns]
     history_path = append_history(df, cols) if len(df) else None
@@ -1193,7 +1307,8 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
         md_path.write_text("\n".join(shortlist_lines(site_df, site, top, verdicts, funnels[site])),
                            encoding="utf-8")
         print(f"       {site}: {len(site_df)} postings, {funnels[site]['shortlisted']} shortlisted "
-              f"→ {md_path}, {csv_path}")
+              + (f"(+{funnels[site]['country_remote']} remote in one country) " if funnels[site]["country_remote"] else "")
+              + f"→ {md_path}, {csv_path}")
     summary_path = OUT_DIR / "run_summary.md"
     summary_path.write_text("\n".join(run_summary_lines(funnels, top, verdicts)), encoding="utf-8")
     print(f"       run summary → {summary_path}")

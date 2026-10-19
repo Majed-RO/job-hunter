@@ -16,6 +16,45 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**LinkedIn: "Remote" + a country gets its own list**
+- A remote LinkedIn posting listed under a whole country outside your
+  allowed list ("United States", "Canada", not a city) no longer reaches
+  the shortlist. On LinkedIn that pairing means remote within that
+  country: Topstep (United States, "fully remote") was shortlisted on
+  2026-10-18 and its apply page asked for US work authorization and
+  sponsorship.
+- Such a posting whose text says "fully remote" / "remote-first"
+  (`LOCATION_REMOTE_STATEMENT`) is still scored. If it clears the
+  thresholds and the LLM didn't find it open to you, it's listed under a
+  new **Remote, but listed in one country** section of the shortlist
+  file, below the shortlist, since some of these hire globally without
+  saying so (G2i). The LLM still fails the ones whose text says US-only
+  (6 of the 8 on the 2026-10-18 run).
+- Without such a statement, it's dropped before scoring as "remote within
+  one country (<country>)". Text saying the role is open more widely
+  (`LOCATION_GLOBAL_REMOTE`: "from anywhere", "worldwide", MENA, EMEA ...)
+  keeps it in the normal shortlist, as before.
+- New `country_remote` column in the CSVs and `history.csv`, and a "One
+  country" column in the run summary. The shortlisted count (and the
+  desktop notification) leaves these out.
+- LinkedIn only. On Indeed, "Remote, US" can be open remote (Holox).
+
+**Eligibility check before fit**
+- The LLM now decides eligibility first: `pass`, `fail` or `unclear`, with
+  a one-line reason, in new `eligibility` and `eligibility_reason` columns.
+  A `fail` is scored 0 and skipped, so it's never shortlisted. An `unclear`
+  one (remote, but the posting doesn't say where you may live) can be
+  shortlisted, marked "Verify location on the apply page". This replaces
+  the old rule that capped an unconfirmed workplace at `maybe`.
+- On 12 known LinkedIn postings: Jobgether ("based in Saudi Arabia"),
+  Kraken (Brazil) and Al Salah (Dubai, on-site) fail; 9x Dev ("Remote
+  across MENA"), Deel ("EMEA") and BairesDev ("from anywhere") pass; G2i,
+  Torentify and Aethel ("fully remote", listed in the US) are unclear.
+- The run metrics count failed eligibility checks ("Ineligible").
+- The new columns make the first run rewrite `history.csv` once to add
+  them (every old row kept, with the new columns empty); later runs append
+  as usual. The system prompt changed, so every posting is re-scored once.
+
 **LinkedIn: location gate before scoring**
 - New free pre-filter for LinkedIn postings (`LOCATION_GATE_SITES`):
   - "likely on-site": listed in a city and the text never says remote (Al

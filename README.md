@@ -2,6 +2,62 @@
 
 English · [العربية](#باختصار)
 
+## Technical overview
+
+A Python data pipeline (about 3,300 lines) that collects job postings from four
+web sources, cleans and deduplicates them into one standardized dataset, filters
+them with rule-based checks, scores what survives with an LLM, and writes
+per-source reports, run metrics and an append-only history log.
+
+**Stack:** Python 3 · pandas · requests · BeautifulSoup · JobSpy · RSS/XML
+(`xml.etree`) · OpenAI SDK via OpenRouter, or Google Gemini · Linux
+
+```
+LinkedIn ─┐ JobSpy search + public job pages (requests, BeautifulSoup)
+Indeed   ─┤ JobSpy search
+WWR      ─┤ category RSS feeds
+jobs.ps  ─┘ RSS feeds + job pages, feed-summary fallback when pages are blocked
+    │
+    ▼
+standardized columns (pandas DataFrame per source)
+    ▼
+deduplication: by URL ─▶ by title + company ─▶ by identical description
+    ▼
+rule-based pre-filter (regex blockers, age, remote status, closed postings) — no API cost
+    ▼
+LLM scoring, cached by a hash of resume + model + posting
+    ▼
+threshold filter ─▶ output/jobs_scored_<site>.csv   (every row, every score)
+                ├─▶ output/shortlist_<site>.md     (ranked report)
+                ├─▶ output/run_summary.md          (per-step metrics, coverage warnings)
+                └─▶ output/history.csv             (append-only, every run)
+```
+
+**Engineering highlights**
+
+- **Multi-source extraction.** Each site is a pluggable module under `sources/`
+  with one `fetch(args) -> DataFrame` contract and a shared set of standard
+  columns, so adding a source doesn't touch the pipeline.
+- **Data quality.** Three-pass deduplication ignores reference codes in titles
+  (`REF#289637`, `Job ID: …`) and keeps links to the merged copies in an
+  `also_posted` column. Postings without a description are dropped, not scored
+  blind.
+- **Cost control.** Deterministic filters run before any paid API call. The
+  score cache means a re-run only pays for postings it hasn't seen.
+- **Resilience.** Polite delays with jitter, retries on throttling (429/5xx),
+  exponential backoff on LLM calls, and a stop after repeated failures so a
+  blocked site degrades gracefully instead of failing the run.
+- **Observability and recall checks.** Every run reports per-step counts and
+  timings, warns when a search hits its result cap or an RSS feed overflowed,
+  and `check_missed.py` audits whether a job found by hand was ever collected.
+- **Configuration.** All tunables live in `config.py`; personal settings stay
+  in a git-ignored `config_local.py` and secrets in `.env`.
+
+In my own setup it runs unattended three times a week from a systemd user timer
+on Ubuntu.
+
+---
+
 ## In short
 
 **What is it?** A script that searches job sites (LinkedIn, Indeed, We Work
@@ -422,15 +478,7 @@ Not interested in: WordPress, sales roles.
 
 ---
 
-How the pipeline fits together:
-
-```
-resume + constraints ──▶ sources/<site>.py scrape ──▶ deterministic pre-filter ──▶
-LLM scoring (cached) ──▶ threshold filter ──▶ output/jobs_scored_<site>.csv
-                                                     ├──▶ output/shortlist_<site>.md
-                                                     ├──▶ output/run_summary.md (all sites)
-                                                     └──▶ output/history.csv (all sites)
-```
+The pipeline diagram is in [Technical overview](#technical-overview) at the top.
 
 ---
 

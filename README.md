@@ -54,7 +54,8 @@ threshold filter ─▶ output/jobs_scored_<site>.csv   (every row, every score)
   in a git-ignored `config_local.py` and secrets in `.env`.
 
 In my own setup it runs unattended three times a week from a systemd user timer
-on Ubuntu.
+on Ubuntu. Sample output from a real run:
+[`examples/run_summary.md`](examples/run_summary.md).
 
 ---
 

@@ -24,3 +24,6 @@ constraints*.txt
 
 # Personal settings (real profile + constraints)
 config_local.py
+
+# Internal session-handoff notes
+PROJECT_STATUS.md

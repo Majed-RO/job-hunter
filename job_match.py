@@ -731,8 +731,8 @@ def _dump_skipped_descriptions(jobs: pd.DataFrame, results: dict[int, dict]) -> 
     """Write full descriptions of LLM-verdicted "skip" postings to disk.
 
     Only the LLM's own skips (not the free pre-filter's, which already have a
-    known blocker label) — this is for diagnosing cases like the W2 anomaly
-    (PROJECT_STATUS.md open item 3), where the LLM's paraphrase of a blocker
+    known blocker label) — this is for diagnosing cases like a W2 posting the
+    regex missed, where the LLM's paraphrase of a blocker
     didn't match the regex meant to catch it, and descriptions weren't saved
     anywhere to check the regex against the real text. Gated behind
     config.DUMP_SKIPPED_DESCRIPTIONS since it writes one file per skip.

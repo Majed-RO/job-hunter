@@ -491,9 +491,9 @@ LINKEDIN_DETAIL_MAX_FAILURES = 5      # stop fetching after this many failures I
 
 # Dump full descriptions of postings the LLM verdicts as "skip" to
 # output/skipped_descriptions/<index>.md, so blocker regexes can be tested
-# against the real text instead of the LLM's paraphrase (see PROJECT_STATUS.md
-# open item 3 — the W2 anomaly couldn't be diagnosed because descriptions
-# weren't saved anywhere). False by default since it writes one file per skip.
+# against the real text instead of the LLM's paraphrase (a W2 blocker the regex
+# missed once couldn't be diagnosed because descriptions weren't saved
+# anywhere). False by default since it writes one file per skip.
 DUMP_SKIPPED_DESCRIPTIONS = False
 
 # ==========================================

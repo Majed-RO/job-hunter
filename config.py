@@ -325,15 +325,31 @@ LOCATION_ALLOWED = [
 # "100% remote work (from anywhere)" roles under e.g. "Cajamarca, Peru".
 # Bare "worldwide"/"global" are left out: company blurbs ("impact worldwide",
 # "a global team") would keep nearly everything.
-LOCATION_GLOBAL_REMOTE = [
+LOCATION_ANYWHERE = [
     r"\bfrom\s+anywhere\b", r"\banywhere\s+in\s+the\s+world\b",
     r"\bremote,?\s*[-–(]?\s*(?:anywhere|global|worldwide)\b",
     r"\bremote\b[^.\n]{0,30}\bworldwide\b", r"\bworldwide\b[^.\n]{0,30}\bremote\b",
     r"\bglobal(?:ly)?\s+remote\b", r"\bfully\s+distributed\b",
     r"\bfrom\s+any\s+(?:country|location)\b", r"\bany\s+time\s*zones?\b",
+]
+LOCATION_GLOBAL_REMOTE = LOCATION_ANYWHERE + [
     # the candidate's region named in the text: let the LLM judge it
     r"\bmena\b", r"\bmiddle east\b", r"\bemea\b", r"palestin",
 ]
+# Region words that don't prove a role is open to the candidate. Deel's "Senior
+# Full Stack Engineer - EMEA" (2026-11-05) was passed on the title, but its
+# careers page lists 23 countries, without Palestine and with India and
+# Pakistan. A posting naming one of these (title, location or the LLM's reason)
+# is marked "Verify location" and ranked below the rest of the shortlist,
+# unless its text says LOCATION_ANYWHERE or names LOCATION_HOME.
+REGION_WORDS = [
+    r"\bemea\b", r"\blatam\b", r"\blatin america\b", r"\bapac\b", r"\basia[- ]pacific\b",
+    r"\beurope\b", r"\bamericas\b",
+]
+# Same, for the candidate's own region, but title and location only: the LLM's
+# reasons use these to describe the candidate ("the candidate's Middle East
+# location"), which flagged Tether and YO AI, both open worldwide.
+HOME_REGION_WORDS = [r"\bmena\b", r"\bmiddle east\b"]
 # A posting listed under a whole country outside LOCATION_ALLOWED ("United
 # States", not "Dallas, TX") is dropped as "remote within one country": on
 # LinkedIn that pairing means remote within that country. Unless its text
@@ -473,6 +489,9 @@ TOP_N_REPORT = 25            # how many postings go into shortlist.md
 # still scored, but go under "Already in pipeline" in the shortlist file and
 # don't take shortlist slots. Put your real list in config_local.py.
 APPLIED_COMPANIES: list[str] = []
+# Single jobs you've applied to, saved with applied.py. Same effect, for that
+# job only (and copies of it), so other roles at the company stay on the shortlist.
+APPLIED_JOBS_FILE = "applied_jobs.txt"
 WORKERS = 6                  # parallel LLM scoring calls (used for LLM_PROVIDER="openrouter")
 
 # Used instead of WORKERS when LLM_PROVIDER == "gemini". Google's free tier

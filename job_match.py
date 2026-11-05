@@ -70,6 +70,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import config
+from applied import load_applied
+from check_missed import job_key
 from sources import REGISTRY, load_source
 from sources.common import (RUN_STATS, STANDARD_COLUMNS, days_since, is_city_level, title_blocked,
                             utf8_console)
@@ -133,6 +135,9 @@ _LOC_HOME = _any_of(getattr(config, "LOCATION_HOME", []))
 _LOC_ALLOWED = _any_of(getattr(config, "LOCATION_HOME", []) + getattr(config, "LOCATION_ALLOWED", []))
 _LOC_GLOBAL = _any_of(getattr(config, "LOCATION_GLOBAL_REMOTE", []))
 _LOC_REMOTE_STATEMENT = _any_of(getattr(config, "LOCATION_REMOTE_STATEMENT", []))
+_LOC_ANYWHERE = _any_of(getattr(config, "LOCATION_ANYWHERE", []))
+_REGION_WORDS = _any_of(getattr(config, "REGION_WORDS", []))
+_ALL_REGION_WORDS = _any_of(getattr(config, "REGION_WORDS", []) + getattr(config, "HOME_REGION_WORDS", []))
 _KEEP_LANGUAGES = _any_of(getattr(config, "LOCATION_GATE_KEEP_LANGUAGES", []))
 _REMOTE_WORDS = _any_of(getattr(config, "LOCATION_REMOTE_WORDS", []))
 NON_ENGLISH_LABEL = "not in English"
@@ -714,11 +719,30 @@ _RETRY_AFTER_RE = re.compile(r"retry in ([\d.]+)s", re.I)
 ELIGIBILITY_VALUES = ("pass", "fail", "unclear")
 
 
-def apply_eligibility(result: dict) -> dict:
+def region_only_word(row, result: dict) -> str | None:
+    """The region word (config.REGION_WORDS) a posting's eligibility rests on,
+    or None. "From anywhere in EMEA" still names only the region. The LLM's
+    reason can show the region but can't clear it: it often says the region
+    includes the candidate's country, which is the claim being checked."""
+    listed = f"{_str_or(row.get('title'), '')} {_str_or(row.get('location'), '')}"
+    match = ((_ALL_REGION_WORDS and _ALL_REGION_WORDS.search(listed))
+             or (_REGION_WORDS and _REGION_WORDS.search(_str_or(result.get("eligibility_reason"), ""))))
+    if not match:
+        return None
+    posting = f"{listed} {_str_or(row.get('description'), '')}".replace("\\", "")
+    posting = re.sub(rf"\banywhere\s+(?:in|within|across)\s+(?:the\s+)?(?:{_ALL_REGION_WORDS.pattern})",
+                     " ", posting, flags=re.I)
+    if (_LOC_ANYWHERE and _LOC_ANYWHERE.search(posting)) or (_LOC_HOME and _LOC_HOME.search(posting)):
+        return None
+    return match.group(0)
+
+
+def apply_eligibility(result: dict, row) -> dict:
     """The LLM's eligibility verdict, normalized (anything else counts as
     "unclear"). A "fail" scores 0 and is skipped whatever fit scores the LLM
-    gave, so it is never shortlisted. Applied on read, not stored in the
-    cache, so changing this rule doesn't need a re-score."""
+    gave, so it is never shortlisted. A region word alone is at best "unclear"
+    (see region_only_word). Applied on read, not stored in the cache, so
+    changing this rule doesn't need a re-score."""
     if "eligibility" not in result:  # pre-filtered, or a failed call
         return result
     result = dict(result)
@@ -726,6 +750,10 @@ def apply_eligibility(result: dict) -> dict:
     result["eligibility"] = value if value in ELIGIBILITY_VALUES else "unclear"
     if result["eligibility"] == "fail":
         result.update(overall=0, verdict="skip")
+    elif word := region_only_word(row, result):
+        result.update(eligibility="unclear", region_verify=True, eligibility_reason=(
+            f"\"{word}\" only names a region; companies often hire in a few countries there, "
+            "so check the careers page lists yours."))
     return result
 
 
@@ -839,7 +867,7 @@ def score_all(jobs: pd.DataFrame, resume: str, constraints: str, workers: int) -
                     print(f"  scored {n}/{len(todo)}", flush=True)
         cache_save(cache)
 
-    results = {idx: apply_eligibility(result) for idx, result in results.items()}
+    results = {idx: apply_eligibility(result, jobs.loc[idx]) for idx, result in results.items()}
 
     if getattr(config, "DUMP_SKIPPED_DESCRIPTIONS", False):
         _dump_skipped_descriptions(jobs, results)
@@ -897,6 +925,54 @@ def append_history(df: pd.DataFrame, cols: list[str]) -> Path | None:
     hist[hist_cols].to_csv(history_path, mode="a", index=False, header=write_header,
                            quoting=csv.QUOTE_NONNUMERIC, escapechar="\\")
     return history_path
+
+
+def seen_key(title, company) -> str | None:
+    """Title + company, as dedupe_key compares them, to spot a posting back
+    under a new URL. None without a company: jobs.ps often lists none, and a
+    bare title like "Project Officer" would match other employers' postings."""
+    company = _str_or(company, "").lower().strip()
+    return f"{dedupe_title(title)}|{company}" if company else None
+
+
+def earlier_passes() -> dict[str, set[str]]:
+    """The runs in history.csv where a posting cleared the thresholds, by URL
+    and by seen_key. Read from the real output folder on a --dry-run too. We
+    Work Remotely's 30-day window brings the same postings back every run:
+    all 5 shortlisted on 2026-11-05 had passed in 4 to 10 earlier runs."""
+    path = Path(config.OUTPUT_DIR) / config.HISTORY_FILENAME
+    if not path.exists():
+        return {}
+    wanted = {"run_timestamp", "passes_threshold", "job_url", "title", "company"}
+    hist = pd.read_csv(path, usecols=lambda c: c in wanted, low_memory=False)
+    if not wanted <= set(hist.columns):
+        return {}
+    runs: dict[str, set[str]] = {}
+    for _, r in hist[hist["passes_threshold"].astype(str).str.lower() == "true"].iterrows():
+        for key in (r["job_url"], seen_key(r["title"], r["company"])):
+            if isinstance(key, str):
+                runs.setdefault(key, set()).add(r["run_timestamp"])
+    return runs
+
+
+def applied_index() -> dict[str, str]:
+    """The date applied (see applied.py) by job_key and by seen_key, so a copy
+    of the job under another link counts as the same job."""
+    index = {}
+    for job in load_applied():
+        applied_on = job["date"] or "date not saved"
+        index[job_key(job["url"])] = applied_on
+        if key := seen_key(job["title"], job["company"]):
+            index[key] = applied_on
+    return index
+
+
+def applied_on(row, index: dict[str, str]) -> str | None:
+    """The date this posting or a copy of it was saved as applied to, else None."""
+    also = row.get("also_posted")
+    links = [row.get("job_url"), *(also.split("; ") if isinstance(also, str) else [])]
+    keys = [job_key(link) for link in links] + [seen_key(row.get("title"), row.get("company"))]
+    return next((index[k] for k in keys if k in index), None)
 
 
 def shortlist_meta(r) -> str:
@@ -970,6 +1046,7 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
     passed = int(df["passes_threshold"].sum()) if len(df) else 0
     country_remote = int((df["passes_threshold"] & df["country_remote"]).sum()) if len(df) else 0
     in_pipeline = int((df["passes_threshold"] & df["in_pipeline"]).sum()) if len(df) else 0
+    seen_before = int((df["passes_threshold"] & df["seen_before"]).sum()) if len(df) else 0
     return {
         "scraped": s.get("rows_by_source", {}).get(site, 0),
         "unique": unique,
@@ -985,9 +1062,10 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
         "error": by_verdict.get("error", 0),
         "verdict_ok": sum(by_verdict.get(v, 0) for v in verdicts),
         "passed": passed,
-        "shortlisted": min(passed - country_remote - in_pipeline, top),
+        "shortlisted": min(passed - country_remote - in_pipeline - seen_before, top),
         "country_remote": min(country_remote, top),
         "in_pipeline": min(in_pipeline, top),
+        "seen_before": min(seen_before, top),
     }
 
 
@@ -1008,6 +1086,8 @@ def _apart_text(f: dict) -> str:
         parts.append(f"{f['country_remote']} remote but listed in one country")
     if f.get("in_pipeline"):
         parts.append(f"{f['in_pipeline']} already in pipeline")
+    if f.get("seen_before"):
+        parts.append(f"{f['seen_before']} seen before")
     return " and ".join(parts)
 
 
@@ -1114,6 +1194,23 @@ def country_remote_lines(df: pd.DataFrame, top: int) -> list[str]:
     return lines + [""]
 
 
+def seen_before_lines(df: pd.DataFrame, top: int) -> list[str]:
+    """Markdown list of postings that cleared every threshold now and in an
+    earlier run, one line each, so the shortlist above shows only new ones."""
+    rows = df[df["passes_threshold"] & df["seen_before"]].sort_values("region_verify", kind="stable").head(top)
+    if not len(rows):
+        return []
+    lines = ["---", "", f"## Seen before ({len(rows)})", "",
+             "Cleared the thresholds in an earlier run too, so an earlier shortlist has "
+             "their details. Still open as far as this run can tell.", ""]
+    for _, r in rows.iterrows():
+        lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
+                     f"{_str_or(r.get('company'), 'company not listed')} · first seen {r['first_seen']} · "
+                     f"{_plural(int(r['times_seen']), 'earlier run')}"
+                     + (" · verify location on the apply page" if r.get("eligibility") == "unclear" else ""))
+    return lines + [""]
+
+
 def in_pipeline_lines(df: pd.DataFrame, top: int) -> list[str]:
     """Markdown list of postings that cleared every threshold at a company
     already applied to (see is_in_pipeline): kept out of the shortlist."""
@@ -1121,12 +1218,13 @@ def in_pipeline_lines(df: pd.DataFrame, top: int) -> list[str]:
     if not len(rows):
         return []
     lines = ["---", "", f"## Already in pipeline ({len(rows)})", "",
-             "Cleared the thresholds, but you've already applied to this company "
-             "(`APPLIED_COMPANIES`), so these don't take shortlist slots. Check for a role "
-             "you haven't applied to.", ""]
+             "Cleared the thresholds, but you've already applied to this job (`applied.py`) or "
+             "company (`APPLIED_COMPANIES`), so these don't take shortlist slots. Where no date "
+             "is shown, check for a role you haven't applied to.", ""]
     for _, r in rows.iterrows():
         lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
-                     f"{_str_or(r.get('company'), 'company not listed')} · {shortlist_meta(r)}")
+                     f"{_str_or(r.get('company'), 'company not listed')} · {shortlist_meta(r)}"
+                     + (f" · applied {r['applied_on']}" if isinstance(r.get("applied_on"), str) else ""))
         lines.append(f"  - {r['reason']}")
     return lines + [""]
 
@@ -1207,11 +1305,12 @@ def run_summary_paragraph(funnels: dict[str, dict], verdicts: list[str]) -> str:
             f"{_plural(t['llm_calls'], 'new LLM call')}, {_fmt_time('scoring')}). "
             f"The LLM rated {t['apply']} apply, {t['maybe']} maybe and {t['skip']} skip"
             + (f", with {_plural(t['error'], 'failure')}" if t["error"] else "") + ". ")
-    if t["shortlisted"]:
+    if t["shortlisted"] or _apart_text(t):
         by_board = ", ".join(f"{site} {f['shortlisted']}" for site, f in funnels.items()
                              if f["shortlisted"])
         text += (f"{t['passed']} cleared the score thresholds and {t['shortlisted']} "
-                 f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted ({by_board})"
+                 f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted"
+                 + (f" ({by_board})" if by_board else "")
                  + (f"; {_apart_text(t)} are listed apart." if _apart_text(t) else "."))
     else:
         text += "None cleared the score thresholds, so every shortlist is empty."
@@ -1228,7 +1327,8 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
             ("error", "Failed"),
             ("verdict_ok", "/".join(v.capitalize() for v in verdicts)),
             ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted"),
-            ("country_remote", "One country"), ("in_pipeline", "In pipeline")]
+            ("country_remote", "One country"), ("in_pipeline", "In pipeline"),
+            ("seen_before", "Seen before")]
     lines = ["# Run summary", "", _run_header(), "",
              run_summary_paragraph(funnels, verdicts), "",
              f"Boards: {', '.join(funnels) or '(none)'} · thresholds: "
@@ -1265,11 +1365,15 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
 def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
                     funnel: dict) -> list[str]:
     """Markdown shortlist for one site's rows (already sorted best first)."""
-    shortlist = df[df["passes_threshold"] & ~df["country_remote"] & ~df["in_pipeline"]].head(top)
+    # Region-word postings go last, however well they score (see region_only_word).
+    shortlist = (df[df["passes_threshold"] & ~df["country_remote"] & ~df["in_pipeline"] & ~df["seen_before"]]
+                 .sort_values("region_verify", kind="stable").head(top))
     by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
     lines = [f"# {site} shortlist — top {len(shortlist)} of {len(df)} postings "
              f"({thresholds_text(site)}; "
-             + ", ".join(f"{by_verdict.get(v, 0)} {v}" for v in verdicts) + ")\n"]
+             + ", ".join(f"{by_verdict.get(v, 0)} {v}" for v in verdicts)
+             + (f"; {funnel['seen_before']} seen before, listed below" if funnel.get("seen_before") else "")
+             + ")\n"]
     for _, r in shortlist.iterrows():
         lines.append(f"## {r['overall']} · {r['title']} — {_str_or(r.get('company'), 'company not listed')}")
         lines.append(f"*{shortlist_meta(r)}* · [posting]({r['job_url']})")
@@ -1297,6 +1401,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
+    lines += seen_before_lines(df, top)
     lines += in_pipeline_lines(df, top)
     lines += country_remote_lines(df, top)
     lines += near_miss_lines(df, site, verdicts)
@@ -1333,14 +1438,25 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
     if "eligibility" in df:
         df["country_remote"] &= df["eligibility"] != "pass"
     # Already applied to the company: listed under "Already in pipeline" only.
-    df["in_pipeline"] = (df.apply(is_in_pipeline, axis=1).astype(bool) if len(df)
+    index = applied_index()
+    df["applied_on"] = (df.apply(lambda r: applied_on(r, index), axis=1) if len(df)
+                        else pd.Series(dtype=object))
+    df["in_pipeline"] = ((df.apply(is_in_pipeline, axis=1).astype(bool) | df["applied_on"].notna()) if len(df)
                          else pd.Series(dtype=bool))
     df["country_remote"] &= ~df["in_pipeline"]
+    df["region_verify"] = df["region_verify"].map(_flag).astype(bool) if "region_verify" in df else False
+    # Before append_history(), so this run doesn't count as its own earlier run.
+    runs = earlier_passes()
+    seen = (df.apply(lambda r: runs.get(r["job_url"], set()) | runs.get(seen_key(r["title"], r["company"]), set()),
+                     axis=1) if len(df) else pd.Series(dtype=object))
+    df["times_seen"] = seen.map(len)
+    df["first_seen"] = seen.map(lambda s: min(s)[:10] if s else None)
+    df["seen_before"] = (df["times_seen"] > 0) & ~df["country_remote"] & ~df["in_pipeline"]
 
     cols = ["overall", "passes_threshold", "verdict", "eligibility", "eligibility_reason", "title", "company", "site",
             "location", "search_location", "employment_type", "seniority_level", "date_posted",
             "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
-            "likely_onsite", "country_remote", "in_pipeline", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "likely_onsite", "country_remote", "in_pipeline", "applied_on", "region_verify", "first_seen", "times_seen", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
             "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
     cols = [c for c in cols if c in df.columns]
     history_path = append_history(df, cols) if len(df) else None

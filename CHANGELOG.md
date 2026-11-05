@@ -16,6 +16,34 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**Save the jobs you've applied to**
+- New `applied.py`: paste a job's link after applying. Later runs keep that job
+  and its copies under other links out of the shortlist and list them under
+  **Already in pipeline** with the date. Saved in `applied_jobs.txt`, git-ignored.
+  New `applied_on` column in the CSVs and `history.csv`.
+
+**Shortlists show what's new**
+- The shortlist now holds only postings that never cleared the thresholds
+  before. Those that did go under a new **Seen before** section, one line each,
+  with the date first seen and the number of earlier runs. All 5 We Work
+  Remotely postings shortlisted on 2026-11-05 were repeats, since that board's
+  age window is 30 days. Matched by URL, then title + company, from
+  `history.csv`.
+- The shortlisted count in the run summary and terminal output is now new
+  postings only. New "Seen before" column in the run summary, and `first_seen`
+  and `times_seen` columns in the CSVs and `history.csv`.
+
+**Region words like "EMEA" are checked, not trusted**
+- A posting whose eligibility rests on a region word (`REGION_WORDS` and
+  `HOME_REGION_WORDS`: EMEA, LATAM, APAC, MENA ...) now counts as "unclear", gets a **Verify location
+  on the apply page** line and ranks below the rest of the shortlist,
+  however high it scores. Deel's "Senior Full Stack Engineer - EMEA" topped
+  the 2026-11-05 LinkedIn shortlist, but its careers page lists 23 countries
+  without Palestine. Text saying "from anywhere" or naming your own country
+  clears it.
+- Applied after scoring, so it needs no new LLM calls. New `region_verify`
+  column in the CSVs and `history.csv`.
+
 **Companies you've already applied to stay out of the shortlist**
 - New `APPLIED_COMPANIES` setting. Postings from these companies are still
   scored, but those that clear the thresholds go under a new **Already in

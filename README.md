@@ -216,8 +216,9 @@ Open the `output` folder inside `job-hunter-main`:
 
 - **`shortlist_linkedin.md`** (one file per job site): the jobs worth applying
   to, best first, each with its link, why it fits, and what your resume is
-  missing. Under them come the jobs that nearly made it, then the ones skipped
-  before the AI saw them.
+  missing. Only jobs new to you are at the top; ones from earlier runs follow
+  under **Seen before**, one line each. Under them come the jobs that nearly
+  made it, then the ones skipped before the AI saw them.
 - **`run_summary.md`**: what happened in the run, in numbers.
 
 LinkedIn closes popular jobs early, often within a day. If you read the
@@ -424,8 +425,9 @@ Not interested in: WordPress, sales roles.
 افتح مجلد <code dir="ltr">output</code> داخل <code dir="ltr">job-hunter-main</code>:
 
 - **<code dir="ltr">shortlist_linkedin.md</code>** (ملف لكل موقع توظيف): الوظائف التي تستحق التقديم،
-  الأفضل أولًا، مع رابط كل وظيفة وسبب مناسبتها وما ينقص سيرتك الذاتية. بعدها الوظائف
-  التي اقتربت من القائمة، ثم الوظائف التي استُبعدت قبل أن يراها الذكاء الاصطناعي.
+  الأفضل أولًا، مع رابط كل وظيفة وسبب مناسبتها وما ينقص سيرتك الذاتية. في الأعلى الوظائف
+  الجديدة فقط، وتليها وظائف التشغيلات السابقة تحت **Seen before** بسطر واحد لكل وظيفة. بعدها
+  الوظائف التي اقتربت من القائمة، ثم الوظائف التي استُبعدت قبل أن يراها الذكاء الاصطناعي.
 - **<code dir="ltr">run_summary.md</code>**: ملخص التشغيل بالأرقام.
 
 يغلق لينكدإن الوظائف المطلوبة بكثرة مبكرًا، غالبًا خلال يوم. إذا قرأت القائمة بعد
@@ -669,7 +671,8 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | *(not a config variable)* `is_remote` backstop | When `IS_REMOTE`/`--remote` is on, any posting whose `is_remote` field is explicitly `False` is blocked as `"not confirmed remote"`. For LinkedIn the script computes it from title + description + location using JobSpy's keyword list ("remote", "work from home", "wfh"); for Indeed it's JobSpy's own value. Catches onsite postings that slipped past LinkedIn's/Indeed's own remote filter (seen in practice with LinkedIn's "Promoted by hirer" listings). A missing/unknown value (JobSpy couldn't tell either way) is never blocked on this alone. |
 | `LOCATION_GATE_SITES` | Sites the location gate applies to, when searched remote-only (default: LinkedIn, whose location comes from the job page). The gate drops, before scoring: **likely on-site** postings (city-level location, text never says remote, not in `LOCATION_HOME`), and remote postings whose location matches neither `LOCATION_HOME` nor `LOCATION_ALLOWED` (a whole country outside them, e.g. "United States", is labelled **remote within one country**: on LinkedIn, Remote plus a country means remote within it). Dropped postings are listed under "Dropped before scoring" in the shortlist and kept in `history.csv`, with the location in the label. |
 | `LOCATION_HOME` / `LOCATION_ALLOWED` | Regexes matched against the posting's location. `LOCATION_HOME` is where you live (on-site is fine there); `LOCATION_ALLOWED` is where a remote posting may be listed (MENA/Gulf countries, "Worldwide", "EMEA" ...). A blank location always passes. |
-| `LOCATION_GLOBAL_REMOTE` | Regexes for title/description text saying the role is open from anywhere ("from anywhere", "anywhere in the world", "remote - worldwide", or your region named). A match keeps the posting whatever its location — LinkedIn lists worldwide-remote roles under a single country. |
+| `REGION_WORDS` / `HOME_REGION_WORDS` | Region words that don't prove a role is open to you ("EMEA", "LATAM", "APAC" ...; your own region, "MENA", goes in `HOME_REGION_WORDS`, which counts in the title or location only). A posting that names one in its title or location, or whose eligibility rests on one, is marked **Verify location on the apply page**, ranked below the rest of the shortlist and flagged in the `region_verify` CSV column, because companies often hire in only some countries of a region. It isn't removed. Text saying `LOCATION_ANYWHERE`, or naming `LOCATION_HOME`, clears it; "anywhere in EMEA" doesn't. |
+| `LOCATION_GLOBAL_REMOTE` / `LOCATION_ANYWHERE` | `LOCATION_ANYWHERE` is the "open from anywhere" part. Regexes for title/description text saying the role is open from anywhere ("from anywhere", "anywhere in the world", "remote - worldwide", or your region named). A match keeps the posting whatever its location — LinkedIn lists worldwide-remote roles under a single country. |
 | `LOCATION_GATE_MIN_ENGLISH_SHARE` / `LOCATION_GATE_KEEP_LANGUAGES` | Postings not written in English are dropped as "not in English" (local jobs: French in Paris, Portuguese in São Paulo). A posting counts as not English when its description has a smaller share of common English words than `LOCATION_GATE_MIN_ENGLISH_SHARE` (English text is around 0.2, French/Spanish/Portuguese under 0.04; 0 turns this off). Descriptions matching a `LOCATION_GATE_KEEP_LANGUAGES` regex are kept anyway: Arabic script by default, with `LOCATION_REMOTE_WORDS` ("عن بعد") counting as saying remote for the likely-on-site rule. Shown as a count in "Dropped before scoring"; each one is in the CSV. |
 | `LOCATION_REMOTE_STATEMENT` | Regexes for "fully remote" / "remote-first" without a place. A posting listed under a whole country (e.g. "United States", not "Dallas, TX") with such text isn't dropped: it's scored, and if it clears the thresholds (and the LLM didn't find it open to you) it goes under **Remote, but listed in one country** in the shortlist file, not the shortlist itself. Usually that means remote within that country, but some companies (G2i) hire globally without saying so. Counted in the run summary's "One country" column and the `country_remote` CSV column. |
 | `PREFILTER_DRY_RUN` | `True` scores every posting as normal but records what the pre-filter *would* have blocked in a new `prefilter_flag` column, so you can compare the regex verdict against the LLM's on the same run. Costs full price — use it for a run or two after editing `HARD_BLOCKERS`, then set back to `False`. |
@@ -704,6 +707,7 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `OUTPUT_DIR` | Where `jobs_scored_<site>.csv`, `shortlist_<site>.md` and `history.csv` are written. |
 | `CACHE_PATH` | Where the score cache lives. Safe to delete if you want to force a full re-score. |
 | `TOP_N_REPORT` | How many postings (that clear the thresholds) go into each `shortlist_<site>.md`. |
+| `APPLIED_JOBS_FILE` | Where `applied.py` saves single jobs you've applied to (default `applied_jobs.txt`). |
 | `APPLIED_COMPANIES` | Companies you've already applied to, e.g. `["BairesDev"]` (not case-sensitive, whole words, so `"Proxify"` also matches `Proxify AB`). Their postings are still scored, but those that clear the thresholds go under **Already in pipeline** in the shortlist file and don't take shortlist slots. Counted in the run summary's "In pipeline" column and the `in_pipeline` CSV column. Add a company by hand after you apply; put the list in `config_local.py`. |
 | `WORKERS` | How many scoring calls run in parallel. Higher is faster but more likely to hit rate limits — 4–8 is a reasonable range. |
 | `SEARCH_DELAY_SECONDS` | Pause between search terms during scraping, to reduce 429s from the job boards (this is separate from LLM retries). |
@@ -809,7 +813,8 @@ Columns include `overall`, `passes_threshold` (bool), `verdict`
 `search_location` (which entry in `LOCATIONS` found it), `employment_type`,
 `seniority_level`, `date_posted`, `days_old`, `applicants` (number) and
 `applicants_text` (LinkedIn's wording), `easy_apply`, `is_remote`,
-`likely_onsite`, `in_pipeline`, `reason`, `blockers`, `matched`, `gaps`, the four sub-scores,
+`likely_onsite`, `in_pipeline`, `applied_on`, `region_verify`, `first_seen`, `times_seen`
+(earlier runs where this posting cleared the thresholds), `reason`, `blockers`, `matched`, `gaps`, the four sub-scores,
 and `job_url`. A `prefilter_flag` column is added only when
 `PREFILTER_DRY_RUN` is on.
 
@@ -819,8 +824,12 @@ matched skills, gaps, and any blockers for each. Each entry's first line
 reads like `linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract
 · Easy Apply`, and `likely_onsite` postings get a **Check workplace badge**
 line — open those and look at the On-site/Remote/Hybrid badge before applying.
-After the shortlist comes **Already in pipeline**: postings that cleared the
-thresholds at a company in `APPLIED_COMPANIES`, kept out of the shortlist.
+The shortlist itself holds only postings new to you. After it comes **Seen
+before**: postings that also cleared the thresholds in an earlier run (same URL,
+or same title + company), one line each with the date first seen and the number
+of earlier runs, read from `history.csv`. Then **Already in pipeline**: postings that cleared the
+thresholds that you saved with `applied.py` or at a company in `APPLIED_COMPANIES`,
+kept out of the shortlist.
 Then **Rated apply/maybe but under a threshold**: postings
 the LLM liked that a score threshold held back (e.g. a crowded posting under
 `CROWDED_MIN_OVERALL_SCORE`), each with the threshold it missed.
@@ -854,6 +863,22 @@ skip, failed, apply/maybe, passed thresholds, shortlisted) with an all-boards to
 the time of every step in the run. A **Coverage** section above the table
 lists capped or failed searches per site, when there are any.
 
+### Saving jobs you've applied to — `applied.py`
+
+After you apply, save the job so later runs keep it out of the shortlist:
+
+```bash
+python applied.py          # paste the job's link, press Enter; empty line to finish
+python applied.py --list   # what you've saved
+```
+
+Use the link from the shortlist or the job board; a company careers-page link
+is saved but can't be matched. Later runs list the job, and any copy of it under
+another link, under **Already in pipeline** with the date you applied. A shortlist
+already written doesn't change until the next run. Saved in `applied_jobs.txt`
+(git-ignored), one job per line; delete a line to undo. To skip a whole company,
+use `APPLIED_COMPANIES` instead.
+
 ### Checking for missed jobs — `check_missed.py`
 
 The real test of whether the script loses jobs: browse the boards yourself as
@@ -876,7 +901,8 @@ network calls; history must be on (`ENABLE_HISTORY_LOG`).
 
 ### Re-checking the LinkedIn shortlist — `recheck_shortlist.py`
 
-LinkedIn closes postings early, often within a day once hundreds have
+This checks the new postings at the top of the file, not the **Seen before**
+list. LinkedIn closes postings early, often within a day once hundreds have
 applied. Closed postings are dropped when a run fetches them, but ones that
 close after the run still sit in `shortlist_linkedin.md`. Run this before
 working through the shortlist:
@@ -1090,6 +1116,7 @@ fallback being used by accident (a `[warn]` line prints on the fallback).
 │   ├── shortlist_<site>.md
 │   └── history.csv           ← append-only, all sites, every run, never overwritten
 ├── job_match.py             ← CLI, pre-filter, scoring, output
+├── applied.py               ← save the jobs you've applied to
 ├── check_missed.py          ← "did the script see this job?" for links you found yourself
 ├── recheck_shortlist.py     ← moves LinkedIn postings closed since the run out of the shortlist
 ├── sources/                 ← one module per job site

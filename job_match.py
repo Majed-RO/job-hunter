@@ -139,6 +139,10 @@ NON_ENGLISH_LABEL = "not in English"
 LIKELY_ONSITE_LABEL = "likely on-site (city location, never says remote)"
 LOCATION_LABEL = "location outside allowlist"
 COUNTRY_REMOTE_LABEL = "remote within one country"
+# Companies already applied to (config.APPLIED_COMPANIES), as whole words so
+# "Lemon" doesn't match "Lemonade" but "Proxify" does match "Proxify AB".
+_APPLIED_COMPANIES = _any_of([rf"(?<!\w){re.escape(name)}(?!\w)"
+                              for name in getattr(config, "APPLIED_COMPANIES", [])])
 
 SYSTEM_PROMPT = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
 
@@ -188,7 +192,12 @@ If "unclear": score fit normally; the missing location statement alone is not a 
 to mark the posting down or skip it, since the candidate will check the apply page.
 
 logistics_fit scores location, work authorization, timezone overlap and contract type
-against the candidate's constraints."""
+against the candidate's constraints. Staffing, outsourcing and nearshore firms and talent
+networks often post one remote role under many countries, so their Location line is
+usually not where the work happens or whose hours apply. For these firms, judge timezone
+overlap only from hours or a timezone the text itself states, never from the Location
+line; if the text states none, do not lower logistics_fit for timezone. This affects
+timezone scoring only, not eligibility."""
 
 USER_TEMPLATE = """<candidate_resume>
 {resume}
@@ -488,6 +497,14 @@ def is_country_remote(row) -> bool:
     text = f"{row.get('title') or ''} {_str_or(row.get('description'), '')}".replace("\\", "")
     return bool(_LOC_REMOTE_STATEMENT and _LOC_REMOTE_STATEMENT.search(text)
                 and not (_LOC_GLOBAL and _LOC_GLOBAL.search(text)))
+
+
+def is_in_pipeline(row) -> bool:
+    """The posting's company is in config.APPLIED_COMPANIES. BairesDev reposts
+    the same roles under many countries and took 2 of 3 LinkedIn shortlist
+    slots (2026-11-05). These are still scored, in case a new role there is
+    worth another application, but are listed apart from the shortlist."""
+    return bool(_APPLIED_COMPANIES and _APPLIED_COMPANIES.search(_str_or(row.get("company"), "")))
 
 
 # --------------------------------------------------------------------------- #
@@ -952,6 +969,7 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
     prefiltered = scoring.get("prefiltered", 0)
     passed = int(df["passes_threshold"].sum()) if len(df) else 0
     country_remote = int((df["passes_threshold"] & df["country_remote"]).sum()) if len(df) else 0
+    in_pipeline = int((df["passes_threshold"] & df["in_pipeline"]).sum()) if len(df) else 0
     return {
         "scraped": s.get("rows_by_source", {}).get(site, 0),
         "unique": unique,
@@ -967,8 +985,9 @@ def site_funnel(site: str, df: pd.DataFrame, top: int, verdicts: list[str]) -> d
         "error": by_verdict.get("error", 0),
         "verdict_ok": sum(by_verdict.get(v, 0) for v in verdicts),
         "passed": passed,
-        "shortlisted": min(passed - country_remote, top),
+        "shortlisted": min(passed - country_remote - in_pipeline, top),
         "country_remote": min(country_remote, top),
+        "in_pipeline": min(in_pipeline, top),
     }
 
 
@@ -979,6 +998,17 @@ def _total_time() -> str:
 
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _apart_text(f: dict) -> str:
+    """The postings that cleared the thresholds but are listed apart from the
+    shortlist, in words; "" if there are none."""
+    parts = []
+    if f.get("country_remote"):
+        parts.append(f"{f['country_remote']} remote but listed in one country")
+    if f.get("in_pipeline"):
+        parts.append(f"{f['in_pipeline']} already in pipeline")
+    return " and ".join(parts)
 
 
 def site_paragraph(site: str, f: dict, top: int, verdicts: list[str]) -> str:
@@ -1002,9 +1032,9 @@ def site_paragraph(site: str, f: dict, top: int, verdicts: list[str]) -> str:
     else:
         text += (f"Of the {f['verdict_ok']} rated {'/'.join(verdicts)}, {f['passed']} "
                  f"cleared the score thresholds")
-        if f["country_remote"]:
-            text += (f"; {f['country_remote']} of those are remote but listed in one country, "
-                     f"so they're listed apart, and {f['shortlisted']} shortlisted.")
+        apart = _apart_text(f)
+        if apart:
+            text += f"; of those, {apart} are listed apart, and {f['shortlisted']} shortlisted."
         else:
             text += (f", and the top {top} of those were shortlisted." if f["passed"] > top
                      else f", so {f['shortlisted']} {'is' if f['shortlisted'] == 1 else 'are'} shortlisted.")
@@ -1084,6 +1114,23 @@ def country_remote_lines(df: pd.DataFrame, top: int) -> list[str]:
     return lines + [""]
 
 
+def in_pipeline_lines(df: pd.DataFrame, top: int) -> list[str]:
+    """Markdown list of postings that cleared every threshold at a company
+    already applied to (see is_in_pipeline): kept out of the shortlist."""
+    rows = df[df["passes_threshold"] & df["in_pipeline"]].head(top)
+    if not len(rows):
+        return []
+    lines = ["---", "", f"## Already in pipeline ({len(rows)})", "",
+             "Cleared the thresholds, but you've already applied to this company "
+             "(`APPLIED_COMPANIES`), so these don't take shortlist slots. Check for a role "
+             "you haven't applied to.", ""]
+    for _, r in rows.iterrows():
+        lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
+                     f"{_str_or(r.get('company'), 'company not listed')} · {shortlist_meta(r)}")
+        lines.append(f"  - {r['reason']}")
+    return lines + [""]
+
+
 def near_miss_lines(df: pd.DataFrame, site: str, verdicts: list[str]) -> list[str]:
     """Markdown list of one site's postings the LLM rated apply/maybe that
     missed a score threshold, with which one, so a good match held back by a
@@ -1106,7 +1153,8 @@ def near_miss_lines(df: pd.DataFrame, site: str, verdicts: list[str]) -> list[st
         lines.append(f"- **{r['overall']}** {str(r['verdict']).upper()} · [{r['title']}]({r['job_url']}) — "
                      f"{_str_or(r.get('company'), 'company not listed')} · {'; '.join(why)}"
                      + (" · check workplace badge" if _flag(r.get("likely_onsite")) else "")
-                     + (" · remote, listed in one country" if _flag(r.get("country_remote"))
+                     + (" · already in pipeline" if _flag(r.get("in_pipeline"))
+                        else " · remote, listed in one country" if _flag(r.get("country_remote"))
                         else " · verify location on the apply page" if r.get("eligibility") == "unclear" else ""))
         lines.append(f"  - {r['reason']}")
     return lines + [""]
@@ -1138,7 +1186,7 @@ def run_metrics_lines(site: str, f: dict, top: int, verdicts: list[str]) -> list
              f"| score thresholds | — | {f['verdict_ok']} | {f['passed']} | "
              f"{thresholds_text(site)} |",
              f"| shortlist | — | {f['passed']} | {f['shortlisted']} | top {top} kept"
-             + (f"; {f['country_remote']} remote in one country listed apart" if f["country_remote"] else "")
+             + (f"; {_apart_text(f)} listed apart" if _apart_text(f) else "")
              + " |",
              f"| **total** | **{_total_time()}** (whole run) | **{f['scraped']}** | "
              f"**{f['shortlisted']}** | {f['scraped']} scraped → {f['shortlisted']} shortlisted |"]
@@ -1164,8 +1212,7 @@ def run_summary_paragraph(funnels: dict[str, dict], verdicts: list[str]) -> str:
                              if f["shortlisted"])
         text += (f"{t['passed']} cleared the score thresholds and {t['shortlisted']} "
                  f"{'was' if t['shortlisted'] == 1 else 'were'} shortlisted ({by_board})"
-                 + (f"; {t['country_remote']} remote but listed in one country are listed apart."
-                    if t.get("country_remote") else "."))
+                 + (f"; {_apart_text(t)} are listed apart." if _apart_text(t) else "."))
     else:
         text += "None cleared the score thresholds, so every shortlist is empty."
     return text
@@ -1181,7 +1228,7 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
             ("error", "Failed"),
             ("verdict_ok", "/".join(v.capitalize() for v in verdicts)),
             ("passed", "Passed thresholds"), ("shortlisted", "Shortlisted"),
-            ("country_remote", "One country")]
+            ("country_remote", "One country"), ("in_pipeline", "In pipeline")]
     lines = ["# Run summary", "", _run_header(), "",
              run_summary_paragraph(funnels, verdicts), "",
              f"Boards: {', '.join(funnels) or '(none)'} · thresholds: "
@@ -1218,7 +1265,7 @@ def run_summary_lines(funnels: dict[str, dict], top: int, verdicts: list[str]) -
 def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
                     funnel: dict) -> list[str]:
     """Markdown shortlist for one site's rows (already sorted best first)."""
-    shortlist = df[df["passes_threshold"] & ~df["country_remote"]].head(top)
+    shortlist = df[df["passes_threshold"] & ~df["country_remote"] & ~df["in_pipeline"]].head(top)
     by_verdict = shortlist["verdict"].astype(str).str.lower().value_counts()
     lines = [f"# {site} shortlist — top {len(shortlist)} of {len(df)} postings "
              f"({thresholds_text(site)}; "
@@ -1250,6 +1297,7 @@ def shortlist_lines(df: pd.DataFrame, site: str, top: int, verdicts: list[str],
         if r["gaps"]:
             lines.append(f"- Gaps: {r['gaps']}")
         lines.append("")
+    lines += in_pipeline_lines(df, top)
     lines += country_remote_lines(df, top)
     lines += near_miss_lines(df, site, verdicts)
     lines += dropped_lines(df)
@@ -1284,11 +1332,15 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
                             else pd.Series(dtype=bool))
     if "eligibility" in df:
         df["country_remote"] &= df["eligibility"] != "pass"
+    # Already applied to the company: listed under "Already in pipeline" only.
+    df["in_pipeline"] = (df.apply(is_in_pipeline, axis=1).astype(bool) if len(df)
+                         else pd.Series(dtype=bool))
+    df["country_remote"] &= ~df["in_pipeline"]
 
     cols = ["overall", "passes_threshold", "verdict", "eligibility", "eligibility_reason", "title", "company", "site",
             "location", "search_location", "employment_type", "seniority_level", "date_posted",
             "days_old", "applicants", "applicants_text", "easy_apply", "is_remote",
-            "likely_onsite", "country_remote", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
+            "likely_onsite", "country_remote", "in_pipeline", "feed_only", "also_posted", "reason", "blockers", "prefilter_flag", "matched", "gaps",
             "stack_fit", "seniority_fit", "domain_fit", "logistics_fit", "job_url"]
     cols = [c for c in cols if c in df.columns]
     history_path = append_history(df, cols) if len(df) else None
@@ -1307,7 +1359,7 @@ def write_outputs(df: pd.DataFrame, top: int, sites: list[str]) -> None:
         md_path.write_text("\n".join(shortlist_lines(site_df, site, top, verdicts, funnels[site])),
                            encoding="utf-8")
         print(f"       {site}: {len(site_df)} postings, {funnels[site]['shortlisted']} shortlisted "
-              + (f"(+{funnels[site]['country_remote']} remote in one country) " if funnels[site]["country_remote"] else "")
+              + (f"(+{_apart_text(funnels[site])}) " if _apart_text(funnels[site]) else "")
               + f"→ {md_path}, {csv_path}")
     summary_path = OUT_DIR / "run_summary.md"
     summary_path.write_text("\n".join(run_summary_lines(funnels, top, verdicts)), encoding="utf-8")

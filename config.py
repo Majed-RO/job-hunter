@@ -468,6 +468,11 @@ Not interested in: <role types to avoid>.
 OUTPUT_DIR = "output"
 CACHE_PATH = ".jobcache/scores.json"
 TOP_N_REPORT = 25            # how many postings go into shortlist.md
+# Companies you've already applied to, in plain words (not case-sensitive,
+# whole words, so "Proxify" also matches "Proxify AB"). Their postings are
+# still scored, but go under "Already in pipeline" in the shortlist file and
+# don't take shortlist slots. Put your real list in config_local.py.
+APPLIED_COMPANIES: list[str] = []
 WORKERS = 6                  # parallel LLM scoring calls (used for LLM_PROVIDER="openrouter")
 
 # Used instead of WORKERS when LLM_PROVIDER == "gemini". Google's free tier

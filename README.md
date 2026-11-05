@@ -704,6 +704,7 @@ Edit this file for anything you expect to reuse across runs. CLI flags
 | `OUTPUT_DIR` | Where `jobs_scored_<site>.csv`, `shortlist_<site>.md` and `history.csv` are written. |
 | `CACHE_PATH` | Where the score cache lives. Safe to delete if you want to force a full re-score. |
 | `TOP_N_REPORT` | How many postings (that clear the thresholds) go into each `shortlist_<site>.md`. |
+| `APPLIED_COMPANIES` | Companies you've already applied to, e.g. `["BairesDev"]` (not case-sensitive, whole words, so `"Proxify"` also matches `Proxify AB`). Their postings are still scored, but those that clear the thresholds go under **Already in pipeline** in the shortlist file and don't take shortlist slots. Counted in the run summary's "In pipeline" column and the `in_pipeline` CSV column. Add a company by hand after you apply; put the list in `config_local.py`. |
 | `WORKERS` | How many scoring calls run in parallel. Higher is faster but more likely to hit rate limits — 4–8 is a reasonable range. |
 | `SEARCH_DELAY_SECONDS` | Pause between search terms during scraping, to reduce 429s from the job boards (this is separate from LLM retries). |
 
@@ -808,7 +809,7 @@ Columns include `overall`, `passes_threshold` (bool), `verdict`
 `search_location` (which entry in `LOCATIONS` found it), `employment_type`,
 `seniority_level`, `date_posted`, `days_old`, `applicants` (number) and
 `applicants_text` (LinkedIn's wording), `easy_apply`, `is_remote`,
-`likely_onsite`, `reason`, `blockers`, `matched`, `gaps`, the four sub-scores,
+`likely_onsite`, `in_pipeline`, `reason`, `blockers`, `matched`, `gaps`, the four sub-scores,
 and `job_url`. A `prefilter_flag` column is added only when
 `PREFILTER_DRY_RUN` is on.
 
@@ -818,7 +819,9 @@ matched skills, gaps, and any blockers for each. Each entry's first line
 reads like `linkedin · Cairo, Egypt · 2 days old · 45 applicants · Contract
 · Easy Apply`, and `likely_onsite` postings get a **Check workplace badge**
 line — open those and look at the On-site/Remote/Hybrid badge before applying.
-After the shortlist comes **Rated apply/maybe but under a threshold**: postings
+After the shortlist comes **Already in pipeline**: postings that cleared the
+thresholds at a company in `APPLIED_COMPANIES`, kept out of the shortlist.
+Then **Rated apply/maybe but under a threshold**: postings
 the LLM liked that a score threshold held back (e.g. a crowded posting under
 `CROWDED_MIN_OVERALL_SCORE`), each with the threshold it missed.
 Then **Dropped before scoring**: every posting the free

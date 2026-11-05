@@ -16,6 +16,24 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**Companies you've already applied to stay out of the shortlist**
+- New `APPLIED_COMPANIES` setting. Postings from these companies are still
+  scored, but those that clear the thresholds go under a new **Already in
+  pipeline** section instead of taking shortlist slots. BairesDev reposts
+  the same roles under many countries and held 2 of 3 LinkedIn shortlist
+  slots on 2026-11-05. The list is empty by default, so nothing changes
+  until you add to it.
+
+**Staffing firms: the listed country no longer counts against timezone fit**
+- The scoring prompt now says staffing, outsourcing and nearshore firms'
+  Location line usually isn't where the work happens, so timezone overlap
+  is judged only from hours or a timezone the text states, and stating none
+  costs nothing. Stated hours still count (Kake's "6-7h PST overlap"). The same
+  BairesDev text scored `logistics_fit` 85 under Venezuela and 50 under Peru
+  ("Lima-based hours"). Eligibility isn't affected.
+- The prompt is part of the score cache key, so the next run re-scores every
+  posting it finds once, instead of serving cached scores.
+
 **LinkedIn: "Remote" + a country gets its own list**
 - A remote LinkedIn posting listed under a whole country outside your
   allowed list ("United States", "Canada", not a city) no longer reaches

@@ -210,7 +210,8 @@ def enrich(jobs: pd.DataFrame, proxies: list[str] | None = None) -> pd.DataFrame
             # the scorer with no location (Kraken, Block Labs, 2026-10-15).
             if info.get("li_location"):
                 jobs.at[idx, "location"] = info["li_location"]
-            text = f"{row.get('title') or ''} {info.get('description') or ''}"
+            # Markdown escapes hyphens ("remote\-first"); _STRONG_REMOTE_RE wants "remote-first".
+            text = f"{row.get('title') or ''} {info.get('description') or ''}".replace("\\", "")
             jobs.at[idx, "likely_onsite"] = is_likely_onsite(info.get("li_location"), text)
         if n % 20 == 0 or n == len(todo):
             print(f"  fetched {n}/{len(todo)}", flush=True)

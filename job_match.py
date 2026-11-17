@@ -141,6 +141,10 @@ _ALL_REGION_WORDS = _any_of(getattr(config, "REGION_WORDS", []) + getattr(config
 _KEEP_LANGUAGES = _any_of(getattr(config, "LOCATION_GATE_KEEP_LANGUAGES", []))
 _REMOTE_WORDS = _any_of(getattr(config, "LOCATION_REMOTE_WORDS", []))
 NON_ENGLISH_LABEL = "not in English"
+RELOCATION_LABEL = "relocation required"
+# Sites whose postings must be in English or a kept language (config.LANGUAGE_CHECK_SITES).
+_LANG_CHECK_SITES = {s.lower() for s in getattr(config, "LANGUAGE_CHECK_SITES",
+                                                getattr(config, "LOCATION_GATE_SITES", []))}
 LIKELY_ONSITE_LABEL = "likely on-site (city location, never says remote)"
 LOCATION_LABEL = "location outside allowlist"
 COUNTRY_REMOTE_LABEL = "remote within one country"
@@ -149,25 +153,9 @@ COUNTRY_REMOTE_LABEL = "remote within one country"
 _APPLIED_COMPANIES = _any_of([rf"(?<!\w){re.escape(name)}(?!\w)"
                               for name in getattr(config, "APPLIED_COMPANIES", [])])
 
-SYSTEM_PROMPT = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
-
-Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
-{
-  "eligibility": "pass" | "fail" | "unclear",
-  "eligibility_reason": "one sentence, max 20 words: what in the posting decides it",
-  "overall": int 0-100,
-  "stack_fit": int 0-100,
-  "seniority_fit": int 0-100,
-  "domain_fit": int 0-100,
-  "logistics_fit": int 0-100,
-  "verdict": "apply" | "maybe" | "skip",
-  "reason": "one sentence, max 25 words",
-  "matched": ["at most 5 concrete skills the posting asks for that the resume proves"],
-  "gaps": ["at most 3 requirements the resume does not cover"],
-  "blockers": ["hard disqualifiers: citizenship/clearance/visa sponsorship-required/timezone/onsite. Empty list if none."]
-}
-
-Decide eligibility FIRST, before judging fit: can this candidate be hired for this role
+# Eligibility rules for the scoring prompt: remote-only by default, or
+# config.OPEN_TO_RELOCATION for a candidate who will relocate with visa sponsorship.
+REMOTE_ELIGIBILITY = """Decide eligibility FIRST, before judging fit: can this candidate be hired for this role
 from where they live, under their constraints? Use the Location, Remote and Workplace
 check lines as well as the description.
 - "fail": something rules the candidate out: on-site or hybrid work outside the
@@ -196,13 +184,65 @@ If eligibility is "fail": verdict "skip", logistics_fit below 20, overall at mos
 If "unclear": score fit normally; the missing location statement alone is not a reason
 to mark the posting down or skip it, since the candidate will check the apply page.
 
-logistics_fit scores location, work authorization, timezone overlap and contract type
+"""
+
+RELOCATION_ELIGIBILITY = """Decide eligibility FIRST, before judging fit: can this candidate be hired for this role
+under their constraints? The candidate will relocate to any country, and can then work
+on-site, hybrid or remote, but needs the employer to sponsor the work visa. Use the
+Location, Remote and Workplace check lines as well as the description.
+- "fail": something rules the candidate out: the posting requires citizenship,
+  permanent residency or an existing work authorization/permit for that country (e.g.
+  "must be authorized to work in the US", "EU work permit required", "no visa
+  sponsorship"); local candidates only or candidates already living there; security
+  clearance. Also fail a REMOTE role restricted to residents of a country or region the
+  candidate isn't in ("remote within the US", "must reside in Canada"): such roles hire
+  people who already live there and don't relocate anyone.
+- "pass": open to the candidate from where they live (remote from anywhere/worldwide, a
+  region that includes their location, or their own country), or the posting offers
+  visa sponsorship or relocation support.
+- "unclear": an on-site or hybrid role, or a role tied to a country, that says nothing
+  about sponsorship or who may apply. Do NOT fail or mark down a role for being on-site,
+  hybrid, or in another country: relocation is acceptable.
+eligibility_reason quotes or names what decided it ("'visa sponsorship available'",
+"'must be authorized to work in the US'", "on-site in Dubai, sponsorship not stated").
+
+If eligibility is "fail": verdict "skip", logistics_fit below 20, overall at most 30.
+If "unclear": score fit normally. For on-site or hybrid roles in countries where
+employers don't routinely sponsor work visas (US, UK, EU countries, Canada, Australia)
+and the posting doesn't mention sponsorship or relocation, keep logistics_fit at 50 or
+below. In the Gulf (UAE, Saudi Arabia, Qatar, Kuwait, Bahrain, Oman), employers
+normally sponsor the work visa, so don't lower logistics_fit there for that.
+
+"""
+
+_SYSTEM_PROMPT_TEMPLATE = """You screen job postings for a specific candidate. You are blunt and calibrated: most postings are a mediocre fit and should score accordingly. Reserve 85+ for postings where the candidate is clearly in the top slice of applicants.
+
+Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
+{
+  "eligibility": "pass" | "fail" | "unclear",
+  "eligibility_reason": "one sentence, max 20 words: what in the posting decides it",
+  "overall": int 0-100,
+  "stack_fit": int 0-100,
+  "seniority_fit": int 0-100,
+  "domain_fit": int 0-100,
+  "logistics_fit": int 0-100,
+  "verdict": "apply" | "maybe" | "skip",
+  "reason": "one sentence, max 25 words",
+  "matched": ["at most 5 concrete skills the posting asks for that the resume proves"],
+  "gaps": ["at most 3 requirements the resume does not cover"],
+  "blockers": ["hard disqualifiers: citizenship/clearance/visa sponsorship-required/timezone/onsite. Empty list if none."]
+}
+
+{ELIGIBILITY}logistics_fit scores location, work authorization, timezone overlap and contract type
 against the candidate's constraints. Staffing, outsourcing and nearshore firms and talent
 networks often post one remote role under many countries, so their Location line is
 usually not where the work happens or whose hours apply. For these firms, judge timezone
 overlap only from hours or a timezone the text itself states, never from the Location
 line; if the text states none, do not lower logistics_fit for timezone. This affects
 timezone scoring only, not eligibility."""
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace(
+    "{ELIGIBILITY}", RELOCATION_ELIGIBILITY if getattr(config, "OPEN_TO_RELOCATION", False)
+    else REMOTE_ELIGIBILITY)
 
 USER_TEMPLATE = """<candidate_resume>
 {resume}
@@ -363,7 +403,10 @@ def prefilter(row) -> str | None:
     title = row.get("title") or ""
     desc = row.get("description")
     desc = desc if isinstance(desc, str) else ""
-    text = f"{title} {desc}"
+    # Descriptions are markdown with every hyphen escaped ("on\-site",
+    # "in\-office"), which the blocker regexes ("on-?site") never matched:
+    # "On-site presence in Dubai is required" went to the LLM (2026-11-17).
+    text = f"{title} {desc}".replace("\\", "")
 
     blocked = title_blocked(title)
     if blocked:
@@ -401,9 +444,11 @@ def prefilter(row) -> str | None:
     # and is_remote is explicitly False (not NaN/None: "couldn't tell").
     # Not applied to LinkedIn: its public job page has no workplace badge, so
     # a genuinely remote posting often never says "remote" in its text (Modern
-    # Family Law, 2026-10-06) and was dropped. LinkedIn rows rely on the
-    # remote search filter, the explicit onsite/hybrid blockers below, and the
-    # likely_onsite warning that goes to the scorer and the shortlist.
+    # Family Law, 2026-10-06) and was dropped. LinkedIn's remote search
+    # filter does nothing for logged-out searches (verified 2026-11-17), so
+    # LinkedIn rows rely on "remote" in the search keywords
+    # (config.LINKEDIN_REMOTE_KEYWORD), the explicit onsite/hybrid blockers
+    # below, and the location gate's "likely on-site" rule (location_blocked).
     is_remote_flag = row.get("is_remote")
     site_remote_only = remote_only(row.get("site"))
     if (site_remote_only and row.get("site") != "linkedin"
@@ -421,8 +466,16 @@ def prefilter(row) -> str | None:
     for label, pattern, exception in _COMPILED_BLOCKERS:
         if label in _WORKPLACE_LABELS and not site_remote_only:
             continue
+        if label == RELOCATION_LABEL and getattr(config, "OPEN_TO_RELOCATION", False):
+            continue
         if pattern.search(text) and not (exception and exception.search(text)):
             return label
+
+    # Not in English (and not a kept language like Arabic): a local job in a
+    # language the candidate doesn't read. Checked whether or not the site is
+    # searched remote-only: relocating doesn't make a French posting readable.
+    if str(row.get("site")).lower() in _LANG_CHECK_SITES and not is_readable_language(row.get("description")):
+        return NON_ENGLISH_LABEL
 
     blocked = location_blocked(row, text)
     if blocked:
@@ -450,6 +503,13 @@ def english_share(description) -> float:
     return sum(w in _ENGLISH_WORDS for w in words) / len(words) if words else 0.0
 
 
+def is_readable_language(description) -> bool:
+    """English (config.LOCATION_GATE_MIN_ENGLISH_SHARE), or a kept language
+    like Arabic (config.LOCATION_GATE_KEEP_LANGUAGES)."""
+    return (english_share(description) >= getattr(config, "LOCATION_GATE_MIN_ENGLISH_SHARE", 0)
+            or bool(_KEEP_LANGUAGES and _KEEP_LANGUAGES.search(str(description or ""))))
+
+
 def location_blocked(row, text: str) -> str | None:
     """Label if a remote-only site's posting is tied to a place the candidate
     can't work from (config.LOCATION_*), else None. Text saying the role is
@@ -458,11 +518,6 @@ def location_blocked(row, text: str) -> str | None:
     if site not in _LOC_GATE_SITES or not remote_only(site):
         return None
     location = _str_or(row.get("location"), "").strip()
-    # Not in English (and not a kept language like Arabic): a local posting.
-    desc = row.get("description")
-    if (english_share(desc) < getattr(config, "LOCATION_GATE_MIN_ENGLISH_SHARE", 0)
-            and not (_KEEP_LANGUAGES and _KEEP_LANGUAGES.search(str(desc or "")))):
-        return NON_ENGLISH_LABEL
     # Descriptions are markdown with escaped punctuation: "Remote\-first" (G2i).
     text = text.replace("\\", "")
     if (_LOC_GLOBAL and _LOC_GLOBAL.search(text)) or (_LOC_HOME and _LOC_HOME.search(location)):

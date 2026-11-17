@@ -43,6 +43,7 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
     combos = [(loc, term) for loc in args.site_locations.get(site, []) for term in args.terms]
     overrides = getattr(config, "LOCATION_RESULTS_OVERRIDE", {})
     wide_terms = set(getattr(config, "WIDE_SEARCH_TERMS", []))
+    remote_keyword = getattr(config, "LINKEDIN_REMOTE_KEYWORD", "").strip()
     n_searches = 0
     # Searches that came back full (more postings probably exist past the cap)
     # or failed outright, for the Coverage line in the reports.
@@ -62,8 +63,12 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
     too_old = 0
     for i, (loc, term) in enumerate(combos, 1):
         country = jobspy_country(loc)
+        # A location's LOCATION_RESULTS_OVERRIDE also caps wide terms: before
+        # 2026-11-17 the United States searched its low-yield wide terms at 30
+        # and its narrow ones at 10.
         if term in wide_terms:
-            results_wanted = config.WIDE_RESULTS_PER_BOARD
+            results_wanted = min(config.WIDE_RESULTS_PER_BOARD,
+                                 overrides.get(loc, config.WIDE_RESULTS_PER_BOARD))
             note = f" (wide term, results capped at {results_wanted})"
         else:
             results_wanted = overrides.get(loc, args.results)
@@ -71,7 +76,13 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
         if countries_only and not country:
             print(f"[{site}] ({i}/{len(combos)}) {term!r} in {loc!r} skipped: not a supported country")
             continue
-        print(f"[{site}] ({i}/{len(combos)}) {term!r} in {loc!r}{note} …", flush=True)
+        # LinkedIn ignores its own remote filter (config.LINKEDIN_REMOTE_KEYWORD),
+        # so the word goes into the query. search_term keeps the configured
+        # term: the wide-term check and the coverage lines use it.
+        query = term
+        if site == "linkedin" and remote_only and remote_keyword and remote_keyword.lower() not in term.lower():
+            query = f"{term} {remote_keyword}"
+        print(f"[{site}] ({i}/{len(combos)}) {query!r} in {loc!r}{note} …", flush=True)
         n_searches += 1
         # (remote filter, hours_old, check age afterwards) per query
         queries = ([(False, args.hours, False), (True, None, True)] if both
@@ -81,7 +92,7 @@ def search(args, site: str, remote_only: bool, countries_only: bool = False,
             try:
                 df = scrape_jobs(
                     site_name=[site],
-                    search_term=term,
+                    search_term=query,
                     location=loc,
                     is_remote=is_remote,
                     results_wanted=results_wanted,

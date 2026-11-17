@@ -46,7 +46,11 @@ LOCATIONS = [
     "Worldwide",
     "United Arab Emirates",
     "Qatar",
-    "Saudi Arabia"
+    "Saudi Arabia",
+    # Europe, for relocation with visa sponsorship (OPEN_TO_RELOCATION)
+    "Germany",
+    "Netherlands",
+    "United Kingdom",
 ]
 
 # Locations to search, per site. A site not listed here uses LOCATIONS above.
@@ -54,10 +58,10 @@ LOCATIONS = [
 # (e.g. `--sites jobsps --locations ramallah-jobs`).
 # - linkedin / indeed: country or region names, as described for LOCATIONS.
 #   Indeed skips anything that isn't a country it supports (MENA, Worldwide).
-#   LinkedIn isn't listed below, so it follows LOCATIONS, including a
-#   LOCATIONS set in config_local.py (a "linkedin": LOCATIONS entry here would
-#   keep this file's list and ignore that one). Indeed is listed: LOCATIONS
-#   plus Arab markets that are too small to be worth a LinkedIn search.
+#   A site listed below ignores LOCATIONS, including a LOCATIONS set in
+#   config_local.py: set its SITE_LOCATIONS entry there too. Indeed is
+#   listed: LOCATIONS plus Arab markets that are too small to be worth a
+#   LinkedIn search.
 # - jobsps: jobs.ps location slugs, the last part of the location page URL
 #   (https://www.jobs.ps/locations/gaza-jobs -> "gaza-jobs"). Others:
 #   ramallah-jobs, nablus-jobs, hebron-jobs, jerusalem-jobs. "gaza-jobs" is
@@ -91,6 +95,22 @@ LOCATION_RESULTS_OVERRIDE = {
 }
 
 IS_REMOTE = True
+# True = the candidate will relocate to another country for a job, with the
+# employer sponsoring the work visa. The scoring prompt then accepts on-site
+# and hybrid roles anywhere and fails only those that need existing work
+# authorization, citizenship or residency (job_match.RELOCATION_ELIGIBILITY),
+# and the "relocation required" blocker is skipped. Pair it with
+# SITE_REMOTE_ONLY False for the job boards to search on-site jobs too.
+# Changing it re-scores every posting (the prompt is part of the cache key).
+OPEN_TO_RELOCATION = False
+# LinkedIn ignores its remote filter (f_WT) for logged-out searches: on
+# 2026-11-17 on-site, remote and hybrid searches returned exactly the same
+# jobs, and about 100 of 275 postings a run were dropped as "likely on-site".
+# So a remote-only LinkedIn search adds this word to every search term
+# instead. Tested that day on Worldwide searches (20 results each): postings
+# that reached scoring went from 0 to 5 ("senior React engineer") and 3 to 5
+# ("TypeScript full stack engineer"). "" = off.
+LINKEDIN_REMOTE_KEYWORD = "remote"
 
 # Per-site override of IS_REMOTE. False = on-site/hybrid postings are allowed
 # for that site: it isn't asked for remote-only results, the "not confirmed
@@ -370,6 +390,10 @@ LOCATION_REMOTE_STATEMENT = [
 # "you", ...) than this share. On 2026-10-15's 180 gate-dropped postings,
 # non-English ones were at 0-0.035 and English ones at 0.12-0.32. 0 = off.
 LOCATION_GATE_MIN_ENGLISH_SHARE = 0.08
+# Sites the "not in English" rule applies to, whether or not they're searched
+# remote-only: Indeed's German, Dutch and Moroccan markets return local
+# postings in those languages.
+LANGUAGE_CHECK_SITES = ["linkedin", "indeed"]
 # Regexes: a non-English description matching one is kept anyway (and judged
 # by the rules below). Arabic script: the candidate reads Arabic, and Arabic
 # postings are from the target region. [] = drop Arabic postings too.

@@ -16,6 +16,39 @@ GitHub page. How to update without losing your settings: see "Updating" in the
 
 ## Unreleased
 
+**Open to relocation**
+- New `OPEN_TO_RELOCATION` (default `False`). When `True`, the scoring prompt
+  accepts on-site and hybrid roles in any country and fails only those that
+  need citizenship, residency or an existing work permit, say no visa
+  sponsorship, hire locals only, or are remote roles for residents of one
+  country. On-site roles in countries where sponsorship isn't routine (US, UK,
+  EU, Canada, Australia) that don't mention it get `logistics_fit` 50 or
+  below. The `relocation required` blocker is skipped. Pair it with
+  `SITE_REMOTE_ONLY` `False` for LinkedIn and Indeed. With it off, the prompt
+  is unchanged.
+- The "not in English" rule now runs on `LANGUAGE_CHECK_SITES` (LinkedIn and
+  Indeed) whether or not a site is searched remote-only.
+- Germany, Netherlands and United Kingdom added to `LOCATIONS`.
+
+**LinkedIn finds remote jobs again**
+- LinkedIn ignores its own remote filter for logged-out searches: on
+  2026-11-17 on-site, remote and hybrid searches returned exactly the same
+  jobs. About 100 of 275 LinkedIn postings a run were dropped as "likely
+  on-site", and capped searches filled up with them. New
+  `LINKEDIN_REMOTE_KEYWORD` (default `"remote"`) adds the word to every
+  LinkedIn search term instead. On a test that day it raised the postings
+  reaching scoring from 0 to 5 and 3 to 5 per 20 results.
+- `LOCATION_RESULTS_OVERRIDE` now caps wide search terms too. The United
+  States searched "Web Developer" at 30 results and "Next.js developer" at 10.
+
+**On-site and hybrid wording is caught again**
+- Descriptions arrive as markdown with every hyphen escaped (`on\-site`,
+  `in\-office`, `return\-to\-office`), so the on-site, hybrid and
+  return-to-office blockers never matched them. "On-site presence in Dubai is
+  required" was sent to the LLM. The pre-filter now removes the backslashes
+  first, as the location gate already did. The same fix lets "remote-first"
+  count as a clear remote statement for the `likely_onsite` flag.
+
 **Save the jobs you've applied to**
 - New `applied.py`: paste a job's link after applying. Later runs keep that job
   and its copies under other links out of the shortlist and list them under
